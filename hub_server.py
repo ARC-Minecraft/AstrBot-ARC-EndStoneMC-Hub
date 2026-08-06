@@ -148,6 +148,8 @@ def is_known_arc_command(raw_message: str) -> bool:
 
 
 SendQQCallback = Callable[[str], Awaitable[None]]
+MuteQQCallback = Callable[[str, int], Awaitable[bool]]
+GetEnmoApiCallback = Callable[[], Any]
 
 
 class ArcHubServer:
@@ -163,6 +165,8 @@ class ArcHubServer:
         binding_store: BindingStore,
         send_qq: SendQQCallback,
         set_group_card: Callable[[int, str], Awaitable[None]] | None = None,
+        mute_qq: MuteQQCallback | None = None,
+        get_enmo_api: GetEnmoApiCallback | None = None,
         group_names: dict[str, str] | None = None,
         hub_admins: list[str] | None = None,
         sync_group_card: bool = True,
@@ -174,6 +178,8 @@ class ArcHubServer:
         self.binding_store = binding_store
         self.send_qq = send_qq
         self.set_group_card = set_group_card
+        self.mute_qq = mute_qq
+        self.get_enmo_api = get_enmo_api
         self.group_names = group_names or {}
         self.hub_admins = {str(a) for a in (hub_admins or []) if str(a).strip()}
         self.sync_group_card = bool(sync_group_card)
@@ -208,7 +214,9 @@ class ArcHubServer:
         if self._running:
             return
         self._running = True
-        logger.info(f"[弧光EndStone消息中枢] 启动 WebSocket Hub ws://{self.host}:{self.port}")
+        logger.info(
+            f"[弧光EndStone消息中枢] 启动 WebSocket Hub ws://{self.host}:{self.port}"
+        )
         self._serve_task = asyncio.create_task(self._run_ws_server())
 
     async def stop(self) -> None:
@@ -249,7 +257,9 @@ class ArcHubServer:
                 ping_timeout=10,
             ) as server:
                 self._server = server
-                logger.info(f"[弧光EndStone消息中枢] Hub 已监听 ws://{self.host}:{self.port}")
+                logger.info(
+                    f"[弧光EndStone消息中枢] Hub 已监听 ws://{self.host}:{self.port}"
+                )
                 await server.wait_closed()
         except asyncio.CancelledError:
             raise
@@ -423,6 +433,20 @@ class ArcHubServer:
         session_count = data.get("session_count")
         playtime_str = data.get("playtime_str", "")
         origin = str(data.get("server_name") or server_name)
+        raw_player_name = strip_minecraft_format_codes(
+            str(data.get("raw_player_name") or "")
+        ).strip()
+
+        # Chat: optional ENMO guard before QQ / cross-server fan-out.
+        if str(event or "") == "chat":
+            blocked = await self._maybe_block_forbidden_chat(
+                origin_server=server_name,
+                display_player=player,
+                raw_player_name=raw_player_name,
+                message=message,
+            )
+            if blocked:
+                return
 
         qq_msg = self._format_qq_message(
             origin,
@@ -450,6 +474,138 @@ class ArcHubServer:
                 "message": message,
             },
         )
+
+    async def _maybe_block_forbidden_chat(
+        self,
+        *,
+        origin_server: str,
+        display_player: str,
+        raw_player_name: str,
+        message: str,
+    ) -> bool:
+        """Run ENMO guard on MC chat; punish and block forward when hit.
+
+        Args:
+            origin_server: Connected Hub server name that sent the event.
+            display_player: Display label (may include title).
+            raw_player_name: Bare player name when provided by MC.
+            message: Chat text.
+
+        Returns:
+            True if the chat must not be forwarded to QQ / other servers.
+        """
+        if not self.get_enmo_api:
+            return False
+        try:
+            api = self.get_enmo_api()
+        except Exception as e:
+            logger.warning(f"[弧光EndStone消息中枢] 获取 ENMO 护卫 API 失败: {e}")
+            return False
+        if api is None:
+            return False
+
+        player_name = raw_player_name
+        bound_qq = ""
+        if player_name:
+            bound_qq = self.binding_store.get_player_qq(player_name)
+        if not player_name or not bound_qq:
+            resolved_name, resolved_qq = self.binding_store.resolve_player_binding(
+                display_player
+            )
+            if resolved_name:
+                player_name = player_name or resolved_name
+            if resolved_qq:
+                bound_qq = resolved_qq
+        if not player_name:
+            player_name = display_player.strip()
+
+        try:
+            result = api.check(message, user_id=bound_qq or None)
+        except Exception as e:
+            logger.warning(f"[弧光EndStone消息中枢] ENMO 检测失败: {e}")
+            return False
+
+        if not result.get("should_punish"):
+            return False
+
+        hits = int(result.get("hits") or 1)
+        mute_seconds = int(result.get("mute_seconds") or 60)
+        reply = str(result.get("reply") or "").strip()
+        minutes = max(1, (mute_seconds + 59) // 60)
+
+        logger.info(
+            "[弧光EndStone消息中枢] ENMO 命中 chat server=%s player=%s qq=%s hits=%s",
+            origin_server,
+            player_name,
+            bound_qq or "-",
+            hits,
+        )
+
+        # Mute bound QQ body in configured groups.
+        if bound_qq and self.mute_qq:
+            try:
+                ok = await self.mute_qq(bound_qq, mute_seconds)
+                logger.info(
+                    "[弧光EndStone消息中枢] ENMO 禁言 qq=%s %ss ok=%s",
+                    bound_qq,
+                    mute_seconds,
+                    ok,
+                )
+            except Exception as e:
+                logger.error(f"[弧光EndStone消息中枢] ENMO 禁言失败 qq={bound_qq}: {e}")
+
+        # In-game kill + warning on the originating server (silent, no QQ cmd echo).
+        warn_game = reply or f"竟敢辱骂至高无上的ENMO，枪毙{minutes}分钟！"
+        kill_name = player_name.replace('"', "").strip()
+        if " " in kill_name:
+            kill_arg = f'"{kill_name}"'
+        else:
+            kill_arg = kill_name
+        await self._dispatch_silent_console_commands(
+            origin_server,
+            [
+                f"kill {kill_arg}",
+                f"say [ENMO护卫] {kill_name}: {warn_game}",
+            ],
+        )
+
+        # QQ notice (not the original insult).
+        notice = f"[{origin_server}]\n[ENMO护卫] {player_name}: {warn_game}"
+        try:
+            await self.send_qq(notice)
+        except Exception as e:
+            logger.warning(f"[弧光EndStone消息中枢] ENMO 群警告发送失败: {e}")
+
+        return True
+
+    async def _dispatch_silent_console_commands(
+        self, server_name: str, commands: list[str]
+    ) -> None:
+        """Run console commands on one MC server without echoing results to QQ.
+
+        Args:
+            server_name: Connected server name.
+            commands: Console command lines without leading slash.
+        """
+        target_sid = self._server_numeric_id_by_name.get(server_name)
+        for cmd in commands:
+            line = (cmd or "").strip()
+            if not line:
+                continue
+            await self.broadcast_to_all(
+                {
+                    "type": "command_forward",
+                    "raw_message": f"/cmd {line}",
+                    "command_line": f"/cmd {line}",
+                    "target_server_id": target_sid,
+                    "user_id": "0",
+                    "display_name": "ENMO护卫",
+                    "group_id": "0",
+                    "sender_role": "admin",
+                    "is_config_admin": True,
+                    "silent": True,
+                }
+            )
 
     def _format_qq_message(
         self,

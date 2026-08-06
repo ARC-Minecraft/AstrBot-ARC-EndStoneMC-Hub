@@ -15,6 +15,7 @@ from .binding_store import BindingStore
 from .hub_server import ArcHubServer, is_known_arc_command
 
 PLUGIN_NAME = "astrbot_plugin_endstone_arc"
+ENMO_GUARD_PLUGIN = "astrbot_plugin_enmo_guard"
 _HUB_DISPLAY = "弧光EndStone消息中枢"
 _cq_pattern = re.compile(r"\[CQ:(\w+)([^\]]*)\]")
 
@@ -85,6 +86,8 @@ class EndstoneArcMessageCenter(Star):
             binding_store=self._binding_store,
             send_qq=self._send_to_all_target_groups,
             set_group_card=self._set_group_card_all_targets,
+            mute_qq=self._mute_qq_all_targets,
+            get_enmo_api=self._get_enmo_api,
             group_names=self._group_names(),
             hub_admins=admins,
             sync_group_card=bool(self.config.get("sync_group_card", True)),
@@ -100,6 +103,71 @@ class EndstoneArcMessageCenter(Star):
                 )
             except Exception as e:
                 logger.warning(f"[{_HUB_DISPLAY}] 启动播报失败: {e}")
+
+    def _get_enmo_api(self):
+        """Resolve ENMO Guard cross-plugin API when the plugin is active.
+
+        Returns:
+            ENMO ``get_api()`` result, or None if unavailable.
+        """
+        try:
+            meta = self.context.get_registered_star(ENMO_GUARD_PLUGIN)
+        except Exception as e:
+            logger.debug(f"[{_HUB_DISPLAY}] 查找 ENMO 护卫失败: {e}")
+            return None
+        if not meta or not getattr(meta, "activated", False):
+            return None
+        star = getattr(meta, "star_cls", None)
+        if star is None:
+            return None
+        get_api = getattr(star, "get_api", None)
+        if not callable(get_api):
+            return None
+        try:
+            return get_api()
+        except Exception as e:
+            logger.warning(f"[{_HUB_DISPLAY}] 调用 ENMO get_api 失败: {e}")
+            return None
+
+    async def _mute_qq_all_targets(self, user_id: str, seconds: int) -> bool:
+        """Mute a QQ user in every configured target group.
+
+        Args:
+            user_id: QQ user id.
+            seconds: Mute duration in seconds.
+
+        Returns:
+            True if at least one group ban succeeded.
+        """
+        platform_id = (self._platform_id or "").strip()
+        if not platform_id:
+            logger.warning(f"[{_HUB_DISPLAY}] 禁言失败：未学习到 platform_id")
+            return False
+        platform = self.context.get_platform_inst(platform_id)
+        if platform is None:
+            logger.warning(f"[{_HUB_DISPLAY}] 禁言失败：找不到平台 {platform_id}")
+            return False
+        bot = platform.get_client()
+        if bot is None:
+            logger.warning(f"[{_HUB_DISPLAY}] 禁言失败：平台无 client")
+            return False
+        ok_any = False
+        uid = int(user_id)
+        duration = max(1, int(seconds))
+        for gid in self._target_group_ids():
+            try:
+                await bot.call_action(
+                    "set_group_ban",
+                    group_id=int(gid),
+                    user_id=uid,
+                    duration=duration,
+                )
+                ok_any = True
+            except Exception as e:
+                logger.warning(
+                    f"[{_HUB_DISPLAY}] 禁言失败 group={gid} user={user_id}: {e}"
+                )
+        return ok_any
 
     async def _set_group_card_all_targets(self, user_id: int, card: str) -> None:
         """Set QQ group card via aiocqhttp for every configured target group."""

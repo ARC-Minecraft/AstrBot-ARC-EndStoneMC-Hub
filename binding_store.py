@@ -33,7 +33,9 @@ class BindingStore:
             logger.error(f"[弧光EndStone消息中枢] 读取 data.json 失败: {e}")
             self._binding_data = {}
         self._normalize()
-        logger.info(f"[弧光EndStone消息中枢] 已加载绑定数据 {len(self._binding_data)} 条")
+        logger.info(
+            f"[弧光EndStone消息中枢] 已加载绑定数据 {len(self._binding_data)} 条"
+        )
 
     def save(self) -> None:
         self.data_dir.mkdir(parents=True, exist_ok=True)
@@ -100,6 +102,37 @@ class BindingStore:
         data = self._binding_data.get(player_name) or {}
         return str(data.get("qq") or "")
 
+    def resolve_player_binding(self, display_or_name: str) -> tuple[str, str]:
+        """Resolve a display label or raw name to (player_name, qq).
+
+        Tries exact key match first, then the longest binding name that is a
+        suffix of the display label (titles like ``[传奇]Steve``).
+
+        Args:
+            display_or_name: Game display label or raw player name.
+
+        Returns:
+            ``(player_name, qq)``; either may be empty when unresolved.
+        """
+        label = (display_or_name or "").strip()
+        if not label:
+            return "", ""
+        exact = self._binding_data.get(label)
+        if isinstance(exact, dict):
+            return label, str(exact.get("qq") or "")
+
+        best_name = ""
+        for name, data in self._binding_data.items():
+            if not isinstance(data, dict) or not name:
+                continue
+            if label == name or label.endswith(name):
+                if len(name) > len(best_name):
+                    best_name = name
+        if not best_name:
+            return "", ""
+        data = self._binding_data.get(best_name) or {}
+        return best_name, str(data.get("qq") or "")
+
     def get_qq_player(self, qq_number: str) -> str:
         qq = str(qq_number)
         for name, data in self._binding_data.items():
@@ -113,7 +146,10 @@ class BindingStore:
         for name, data in self._binding_data.items():
             if not isinstance(data, dict):
                 continue
-            if str(data.get("qq") or "") == qq or str(data.get("original_qq") or "") == qq:
+            if (
+                str(data.get("qq") or "") == qq
+                or str(data.get("original_qq") or "") == qq
+            ):
                 names.append(name)
         return names
 
@@ -296,10 +332,25 @@ class BindingStore:
             return v is not None and v != ""
 
         hub.setdefault("name", name)
-        for key in ("xuid", "qq", "original_qq", "previous_qq", "unbind_by", "ban_by", "ban_reason", "unban_by"):
+        for key in (
+            "xuid",
+            "qq",
+            "original_qq",
+            "previous_qq",
+            "unbind_by",
+            "ban_by",
+            "ban_reason",
+            "unban_by",
+        ):
             if nz(inc.get(key)) and not nz(hub.get(key)):
                 hub[key] = inc.get(key)
-        for key in ("bind_time", "rebind_time", "unbind_time", "ban_time", "unban_time"):
+        for key in (
+            "bind_time",
+            "rebind_time",
+            "unbind_time",
+            "ban_time",
+            "unban_time",
+        ):
             hub[key] = self._max_optional_ts(hub.get(key), inc.get(key))
         if inc.get("is_banned"):
             hub["is_banned"] = True
