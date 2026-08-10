@@ -1,4 +1,6 @@
 # 弧光 EndStone 消息中枢
+[![Codacy Grade](https://app.codacy.com/project/badge/Grade/ac1ce35120504313aee1c2fd0cda7277)](https://app.codacy.com/gh/ARC-Minecraft/AstrBot-ARC-EndStoneMC-Hub/dashboard?utm_source=gh&utm_medium=referral&utm_content=&utm_campaign=Badge_grade)
+
 
 AstrBot 插件（目录名 `astrbot_plugin_endstone_arc`）：QQ ↔ Minecraft 的 WebSocket 中枢。
 
