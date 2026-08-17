@@ -457,6 +457,10 @@ class ArcHubServer:
         for old_ws, meta in list(self.service_clients.items()):
             if meta.get("name") == server_name:
                 self.service_clients.pop(old_ws, None)
+                logger.warning(
+                    "[弧光EndStone消息中枢] 服务连接 [%s] 已被新连接替换（多开服请使用互不相同的 server_name）",
+                    server_name,
+                )
                 try:
                     await old_ws.close()
                 except Exception:
