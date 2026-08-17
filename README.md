@@ -74,6 +74,7 @@ AI Helper 的 `ai_helper` 连接**不走**上述开停服播报。
 
 ## 更新日志
 
+- **1.6.1**：工具说明补充劈闪电正确格式 `execute at 玩家名 run summon lightning_bolt ~ ~ ~`，避免写成 `effect 玩家名 summon`。
 - **1.6.0**：QQ 群聊也可使用 Minecraft 工具（查在线 / TPS / 信息 / 执行指令）。多开服用 `server` 指定目标；执行指令仅插件管理员、群主和群管。需游戏内 AI Helper 在线。
 - **1.5.1**：服务连接被同名替换时写日志，便于排查多开服 AI Helper 互踢。
 - **1.5.0**：MC AI 身份改为「绑定 QQ 优先、否则 XUID」，不再传群号；执行指令仍在玩家发消息的那台子服上。需搭配 AI Helper ≥ 1.2.0。

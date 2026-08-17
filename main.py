@@ -27,8 +27,11 @@ _MC_AI_IDENTITY_HINT = (
     "执行游戏指令时，在玩家发来这条消息的那台 Minecraft 服务器上执行。"
     "玩家问在线人数、谁在线、TPS、服务器信息或要你执行游戏指令时，"
     "必须调用对应工具查询或执行，禁止凭空编造数字或名单。"
-    "优先用工具执行指令；只有工具不可用时，才在可见回复里使用 "
+    "优先调用 mc_run_command 执行指令；只有工具不可用时，才在可见回复里使用 "
     "[execution_command:实际游戏指令] 标记。"
+    "effect 只能用于药水效果，例如 effect Steve slowness 20 0 true。"
+    "劈闪电必须用 execute at 玩家名 run summon lightning_bolt ~ ~ ~ ，"
+    "禁止 effect 玩家名 summon（summon 不是药水效果）。"
 )
 _QQ_MC_TOOL_HINT = (
     "当前是 QQ 对话，已经接入弧光 Minecraft 中枢。"
@@ -37,6 +40,7 @@ _QQ_MC_TOOL_HINT = (
     "（名称、编号或别名），不要猜测。"
     "mc_run_command 只对插件管理员、群主和群管理员真正执行；"
     "普通人要求改世界时直接说明没有权限。"
+    "effect 只能用于药水效果。劈闪电必须用 execute at 玩家名 run summon lightning_bolt ~ ~ ~。"
 )
 
 
@@ -712,10 +716,10 @@ class EndstoneArcMessageCenter(Star):
     async def mc_run_command(
         self, event: AstrMessageEvent, command: str, server: str = ""
     ) -> str:
-        """在指定 Minecraft 服务器控制台执行一条游戏指令。禁止 stop、kill；gamemode 仅 OP/管理员明确要求时可用。需要真实改游戏世界或给效果时调用。
+        """在指定 Minecraft 服务器控制台执行一条游戏指令。禁止 stop、kill；gamemode 仅 OP/管理员明确要求时可用。需要真实改游戏世界或给效果时调用。劈闪电用 execute at 玩家名 run summon lightning_bolt ~ ~ ~，不要写成 effect 玩家名 summon。
 
         Args:
-            command(string): 不含斜杠的游戏指令，例如 effect Steve night_vision 30 0 true
+            command(string): 不含斜杠的游戏指令。给效果如 effect Steve night_vision 30 0 true；劈闪电如 execute at Steve run summon lightning_bolt ~ ~ ~
             server(string): 目标服务器名称、编号或别名；游戏内可留空；QQ 多开服必须填
         """
         command_line = str(command or "").strip()
