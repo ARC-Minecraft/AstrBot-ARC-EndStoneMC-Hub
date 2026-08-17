@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import uuid
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -196,6 +197,7 @@ class ArcHubServer:
             None
         )
         self.ai_chat_timeout = 180.0
+        self._pending_ai_tool: dict[str, tuple[ServerConnection, asyncio.Future]] = {}
 
     def _ensure_server_numeric_id(self, server_name: str) -> int:
         if server_name not in self._server_numeric_id_by_name:
@@ -226,6 +228,7 @@ class ArcHubServer:
 
     async def stop(self) -> None:
         """Stop Hub and close all MC connections."""
+        self._fail_pending_ai_tools("弧光消息中枢已停止")
         self._running = False
         for ws in list(self.connected_servers.values()):
             try:
@@ -362,6 +365,8 @@ class ArcHubServer:
             was_service = websocket in self.service_clients
             self.service_clients.pop(websocket, None)
             self.ws_to_server.pop(websocket, None)
+            if was_service:
+                self._fail_pending_ai_tools("AI Helper 连接已断开", websocket)
             if server_name and not was_service:
                 self.connected_servers.pop(server_name, None)
                 # Hub WS drop is authoritative (force-killed MC may never send server_stop).
@@ -406,6 +411,13 @@ class ArcHubServer:
             pass
         elif msg_type == "ai_chat":
             asyncio.create_task(self._handle_ai_chat(server_name, ws, data))
+        elif msg_type == "ai_tool_response":
+            rid = str(data.get("request_id") or "")
+            pending = self._pending_ai_tool.get(rid)
+            if pending:
+                _ws, fut = pending
+                if fut and not fut.done():
+                    fut.set_result(data)
         else:
             logger.debug(f"[弧光EndStone消息中枢] [{server_name}] 未知类型: {msg_type}")
 
@@ -425,7 +437,7 @@ class ArcHubServer:
             "server_catalog": self.get_server_catalog(),
             "sync_group_card": self.sync_group_card,
             "hub_admins": sorted(self.hub_admins),
-            "features": ["ai_chat"],
+            "features": ["ai_chat", "ai_tools"],
             "ai_chat": True,
         }
         if my_server_id is not None:
@@ -451,6 +463,94 @@ class ArcHubServer:
                     pass
                 break
         self.service_clients[websocket] = {"name": server_name, "role": role}
+
+    def _fail_pending_ai_tools(
+        self, reason: str, websocket: ServerConnection | None = None
+    ) -> None:
+        """Wake pending MC tool RPCs when a helper connection drops.
+
+        Args:
+            reason: Error text stored on unfinished futures.
+            websocket: If set, only fail RPCs waiting on this helper.
+        """
+        exc = ConnectionError(reason)
+        for rid, (ws, fut) in list(self._pending_ai_tool.items()):
+            if websocket is not None and ws is not websocket:
+                continue
+            if not fut.done():
+                fut.set_exception(exc)
+            self._pending_ai_tool.pop(rid, None)
+
+    def find_ai_helper_ws(self, game_server: str) -> ServerConnection | None:
+        """Find the AI Helper WebSocket for a Minecraft server name.
+
+        Args:
+            game_server: Game server display name.
+
+        Returns:
+            Connected helper WebSocket, or None.
+        """
+        target = str(game_server or "").strip()
+        if not target:
+            return None
+        expected = f"{target}#ai-helper"
+        for ws, meta in list(self.service_clients.items()):
+            if str(meta.get("role") or "") != "ai_helper":
+                continue
+            name = str(meta.get("name") or "")
+            if name == expected or name == target or name.split("#", 1)[0] == target:
+                return ws
+        return None
+
+    async def call_ai_tool(
+        self,
+        game_server: str,
+        action: str,
+        args: dict[str, Any] | None = None,
+        *,
+        timeout: float = 20,
+    ) -> dict[str, Any]:
+        """Ask the MC AI Helper to run a server tool and return its JSON result.
+
+        Args:
+            game_server: Origin Minecraft server name.
+            action: Tool action such as ``list`` / ``tps`` / ``info`` / ``cmd``.
+            args: Extra arguments for the action.
+            timeout: Seconds to wait for the helper reply.
+
+        Returns:
+            Helper ``ai_tool_response`` payload.
+
+        Raises:
+            RuntimeError: When the helper is not connected.
+            TimeoutError: When the helper does not reply in time.
+        """
+        ws = self.find_ai_helper_ws(game_server)
+        if ws is None:
+            raise RuntimeError(f"服务器 [{game_server}] 的 AI Helper 未连接")
+        request_id = str(uuid.uuid4())
+        fut = asyncio.get_running_loop().create_future()
+        self._pending_ai_tool[request_id] = (ws, fut)
+        await ws.send(
+            json.dumps(
+                {
+                    "type": "ai_tool",
+                    "request_id": request_id,
+                    "action": str(action),
+                    "args": args or {},
+                },
+                ensure_ascii=False,
+            )
+        )
+        try:
+            resp = await asyncio.wait_for(fut, timeout=max(5.0, float(timeout)))
+        except asyncio.TimeoutError as e:
+            raise TimeoutError(f"AI 工具超时: {action}") from e
+        finally:
+            self._pending_ai_tool.pop(request_id, None)
+        if not isinstance(resp, dict):
+            raise RuntimeError("AI 工具返回格式异常")
+        return resp
 
     async def _handle_ai_chat(
         self, server_name: str, ws: ServerConnection, data: dict

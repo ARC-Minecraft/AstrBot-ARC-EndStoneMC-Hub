@@ -20,6 +20,15 @@ PLUGIN_NAME = "astrbot_plugin_endstone_arc"
 ARC_GUARD_PLUGIN = "astrbot_plugin_arc_guard"
 _HUB_DISPLAY = "弧光EndStone消息中枢"
 _cq_pattern = re.compile(r"\[CQ:(\w+)([^\]]*)\]")
+_MC_AI_IDENTITY_HINT = (
+    "当前是 Minecraft 游戏内对话。"
+    "发送者 ID 是玩家 XUID（改名也不会变），群号是本 Minecraft 服务器名称。"
+    "昵称只是当前游戏名，对人对记忆请以 XUID 为准。"
+    "玩家问在线人数、谁在线、TPS、服务器信息或要你执行游戏指令时，"
+    "必须调用对应工具查询或执行，禁止凭空编造数字或名单。"
+    "优先用工具执行指令；只有工具不可用时，才在可见回复里使用 "
+    "[execution_command:实际游戏指令] 标记。"
+)
 
 
 class EndstoneArcMessageCenter(Star):
@@ -354,6 +363,8 @@ class EndstoneArcMessageCenter(Star):
     @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE)
     async def on_group_message(self, event: AstrMessageEvent):
         """Forward target-group QQ messages/commands to connected MC servers."""
+        if event.get_extra("mc_ai_event"):
+            return
         if not self._hub:
             return
 
@@ -438,15 +449,96 @@ class EndstoneArcMessageCenter(Star):
     @filter.on_llm_request()
     async def on_llm_request(self, event: AstrMessageEvent, req: ProviderRequest) -> None:
         """Append MC extra system instructions without replacing AstrBot persona."""
+        if not event.get_extra("mc_ai_event"):
+            return
+        parts: list[str] = [_MC_AI_IDENTITY_HINT]
         extra = event.get_extra("mc_ai_extra_system")
-        if not extra:
-            return
-        text = str(extra).strip()
-        if not text:
-            return
+        if extra:
+            text = str(extra).strip()
+            if text:
+                parts.append(text)
         prefix = (req.system_prompt or "").rstrip()
-        block = "# Minecraft Server Extra Instructions\n\n" + text
+        block = "# Minecraft Server Extra Instructions\n\n" + "\n\n".join(parts)
         req.system_prompt = f"{prefix}\n\n{block}\n" if prefix else f"{block}\n"
+
+    async def _call_mc_ai_tool(
+        self, event: AstrMessageEvent, action: str, args: dict | None = None
+    ) -> str:
+        """Run a Minecraft AI Helper tool for the current MC conversation.
+
+        Args:
+            event: Current AstrBot event.
+            action: Helper action name.
+            args: Extra arguments for the action.
+
+        Returns:
+            Plain text for the LLM.
+        """
+        if not event.get_extra("mc_ai_event"):
+            return "该工具只在 Minecraft 游戏内对话中可用，当前不是 MC 会话。"
+        if not self._hub:
+            return "弧光消息中枢尚未启动。"
+        server_name = str(
+            event.get_extra("mc_ai_server") or event.get_group_id() or ""
+        ).strip()
+        if not server_name:
+            return "无法确定 Minecraft 服务器名称。"
+        payload = dict(args or {})
+        payload.setdefault("is_op", bool(event.get_extra("mc_ai_is_op")))
+        payload.setdefault("player_name", str(event.get_extra("mc_ai_player_name") or ""))
+        payload.setdefault("player_xuid", str(event.get_extra("mc_ai_xuid") or ""))
+        try:
+            resp = await self._hub.call_ai_tool(server_name, action, payload, timeout=20)
+        except Exception as e:
+            logger.warning(f"[{_HUB_DISPLAY}] MC 工具 {action} 失败: {e}")
+            return f"调用 Minecraft 工具失败: {e}"
+        if not isinstance(resp, dict):
+            return "Minecraft 工具返回格式异常"
+        if not resp.get("ok"):
+            return str(resp.get("error") or "Minecraft 工具执行失败")
+        return str(resp.get("text") or "").strip() or "（无返回）"
+
+    @filter.llm_tool(name="mc_list_players")
+    async def mc_list_players(self, event: AstrMessageEvent, reason: str) -> str:
+        """查询当前 Minecraft 服务器在线玩家名单与人数。玩家问起谁在线、有没有某某、在线人数时必须调用，禁止编造。
+
+        Args:
+            reason(string): 简要说明为何查询，例如「玩家问谁在线」
+        """
+        _ = reason
+        return await self._call_mc_ai_tool(event, "list")
+
+    @filter.llm_tool(name="mc_get_tps")
+    async def mc_get_tps(self, event: AstrMessageEvent, reason: str) -> str:
+        """查询当前 Minecraft 服务器 TPS / MSPT 等性能数据。玩家问起卡不卡、TPS、延迟时必须调用，禁止编造。
+
+        Args:
+            reason(string): 简要说明为何查询，例如「玩家问 TPS」
+        """
+        _ = reason
+        return await self._call_mc_ai_tool(event, "tps")
+
+    @filter.llm_tool(name="mc_server_info")
+    async def mc_server_info(self, event: AstrMessageEvent, reason: str) -> str:
+        """查询当前 Minecraft 服务器基本信息（名称、版本、在线人数、运行时长等）。不要编造。
+
+        Args:
+            reason(string): 简要说明为何查询，例如「玩家问服务器信息」
+        """
+        _ = reason
+        return await self._call_mc_ai_tool(event, "info")
+
+    @filter.llm_tool(name="mc_run_command")
+    async def mc_run_command(self, event: AstrMessageEvent, command: str) -> str:
+        """在当前 Minecraft 服务器控制台执行一条游戏指令。禁止 stop、kill；gamemode 仅 OP 玩家明确要求时可用。需要真实改游戏世界或给效果时调用。
+
+        Args:
+            command(string): 不含斜杠的游戏指令，例如 effect Steve night_vision 30 0 true
+        """
+        command_line = str(command or "").strip()
+        if not command_line:
+            return "指令为空"
+        return await self._call_mc_ai_tool(event, "cmd", {"command": command_line})
 
     async def _process_ai_chat(self, data: dict) -> dict:
         """Run one Minecraft player message through AstrBot's conversation pipeline.
@@ -458,6 +550,7 @@ class EndstoneArcMessageCenter(Star):
             ``{"ok": True, "reply": "..."}`` or ``{"ok": False, "error": "..."}``.
         """
         player_name = str(data.get("player_name") or "player").strip() or "player"
+        player_xuid = str(data.get("player_xuid") or data.get("xuid") or "").strip()
         server_name = str(data.get("server_name") or "mc").strip() or "mc"
         content = str(data.get("content") or "").strip()
         extra_system = str(data.get("extra_system_prompt") or "").strip()
@@ -472,9 +565,12 @@ class EndstoneArcMessageCenter(Star):
 
         event = McAiMessageEvent(
             player_name=player_name,
+            player_xuid=player_xuid,
             server_name=server_name,
             message=user_text,
             extra_system_prompt=extra_system,
+            is_op=is_op,
+            channel=channel,
         )
         await self.context.get_event_queue().put(event)
         try:
