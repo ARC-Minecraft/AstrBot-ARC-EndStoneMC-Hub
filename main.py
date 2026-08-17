@@ -7,15 +7,17 @@ import re
 
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, MessageEventResult, filter
+from astrbot.api.provider import ProviderRequest
 from astrbot.api.star import Context, Star, StarTools
 from astrbot.core.platform.message_session import MessageSession
 from astrbot.core.platform.message_type import MessageType
 
 from .binding_store import BindingStore
 from .hub_server import ArcHubServer, is_known_arc_command
+from .mc_ai_event import McAiMessageEvent
 
 PLUGIN_NAME = "astrbot_plugin_endstone_arc"
-ENMO_GUARD_PLUGIN = "astrbot_plugin_enmo_guard"
+ARC_GUARD_PLUGIN = "astrbot_plugin_arc_guard"
 _HUB_DISPLAY = "弧光EndStone消息中枢"
 _cq_pattern = re.compile(r"\[CQ:(\w+)([^\]]*)\]")
 
@@ -87,11 +89,16 @@ class EndstoneArcMessageCenter(Star):
             send_qq=self._send_to_all_target_groups,
             set_group_card=self._set_group_card_all_targets,
             mute_qq=self._mute_qq_all_targets,
-            get_enmo_api=self._get_enmo_api,
+            get_arc_guard_api=self._get_arc_guard_api,
             group_names=self._group_names(),
             hub_admins=admins,
             sync_group_card=bool(self.config.get("sync_group_card", True)),
         )
+        self._hub.process_ai_chat = self._process_ai_chat
+        try:
+            self._hub.ai_chat_timeout = float(self.config.get("ai_chat_timeout") or 180)
+        except (TypeError, ValueError):
+            self._hub.ai_chat_timeout = 180.0
         await self._hub.start()
         if bool(self.config.get("startup_announce", True)):
             # Delay slightly so platform adapters are ready.
@@ -104,16 +111,16 @@ class EndstoneArcMessageCenter(Star):
             except Exception as e:
                 logger.warning(f"[{_HUB_DISPLAY}] 启动播报失败: {e}")
 
-    def _get_enmo_api(self):
-        """Resolve ENMO Guard cross-plugin API when the plugin is active.
+    def _get_arc_guard_api(self):
+        """Resolve Arc Guard cross-plugin API when the plugin is active.
 
         Returns:
-            ENMO ``get_api()`` result, or None if unavailable.
+            Arc Guard ``get_api()`` result, or None if unavailable.
         """
         try:
-            meta = self.context.get_registered_star(ENMO_GUARD_PLUGIN)
+            meta = self.context.get_registered_star(ARC_GUARD_PLUGIN)
         except Exception as e:
-            logger.debug(f"[{_HUB_DISPLAY}] 查找 ENMO 护卫失败: {e}")
+            logger.debug(f"[{_HUB_DISPLAY}] 查找弧光护卫失败: {e}")
             return None
         if not meta or not getattr(meta, "activated", False):
             return None
@@ -126,15 +133,20 @@ class EndstoneArcMessageCenter(Star):
         try:
             return get_api()
         except Exception as e:
-            logger.warning(f"[{_HUB_DISPLAY}] 调用 ENMO get_api 失败: {e}")
+            logger.warning(f"[{_HUB_DISPLAY}] 调用弧光护卫 get_api 失败: {e}")
             return None
 
     async def _mute_qq_all_targets(self, user_id: str, seconds: int) -> bool:
-        """Mute a QQ user in every configured target group.
+        """Mute a QQ user in every configured target group (Arc Guard accumulate).
+
+        Prefers ``astrbot_plugin_arc_guard`` ``mute_user_in_group`` so duration
+        is remaining + added. Uses ``respect_whitelist=True`` (normal Arc Guard
+        punishment). Falls back to raw ``set_group_ban`` if Arc Guard is
+        unavailable.
 
         Args:
             user_id: QQ user id.
-            seconds: Mute duration in seconds.
+            seconds: Extra mute seconds to accumulate (or set on fallback).
 
         Returns:
             True if at least one group ban succeeded.
@@ -151,15 +163,47 @@ class EndstoneArcMessageCenter(Star):
         if bot is None:
             logger.warning(f"[{_HUB_DISPLAY}] 禁言失败：平台无 client")
             return False
-        ok_any = False
-        uid = int(user_id)
+
+        uid = str(user_id or "").strip()
         duration = max(1, int(seconds))
+        api = self._get_arc_guard_api()
+        mute_in_group = getattr(api, "mute_user_in_group", None) if api else None
+        ok_any = False
+
         for gid in self._target_group_ids():
+            if callable(mute_in_group):
+                try:
+                    result = await mute_in_group(
+                        bot,
+                        str(gid),
+                        uid,
+                        duration,
+                        respect_whitelist=True,
+                    )
+                    if result.get("ok"):
+                        ok_any = True
+                        logger.info(
+                            f"[{_HUB_DISPLAY}] 弧光护卫累加禁言 group={gid} user={uid} "
+                            f"remaining={result.get('remaining_before')}s "
+                            f"+ add={result.get('added')}s "
+                            f"-> total={result.get('total')}s"
+                        )
+                    else:
+                        logger.warning(
+                            f"[{_HUB_DISPLAY}] 弧光护卫禁言未成功 group={gid} "
+                            f"user={uid}: {result.get('error') or 'unknown'}"
+                        )
+                except Exception as e:
+                    logger.warning(
+                        f"[{_HUB_DISPLAY}] 弧光护卫禁言异常 group={gid} user={uid}: {e}"
+                    )
+                continue
+
             try:
                 await bot.call_action(
                     "set_group_ban",
                     group_id=int(gid),
-                    user_id=uid,
+                    user_id=int(uid),
                     duration=duration,
                 )
                 ok_any = True
@@ -390,3 +434,59 @@ class EndstoneArcMessageCenter(Star):
         if not catalog:
             lines.append("（暂无注册记录）")
         yield event.plain_result("\n".join(lines))
+
+    @filter.on_llm_request()
+    async def on_llm_request(self, event: AstrMessageEvent, req: ProviderRequest) -> None:
+        """Append MC extra system instructions without replacing AstrBot persona."""
+        extra = event.get_extra("mc_ai_extra_system")
+        if not extra:
+            return
+        text = str(extra).strip()
+        if not text:
+            return
+        prefix = (req.system_prompt or "").rstrip()
+        block = "# Minecraft Server Extra Instructions\n\n" + text
+        req.system_prompt = f"{prefix}\n\n{block}\n" if prefix else f"{block}\n"
+
+    async def _process_ai_chat(self, data: dict) -> dict:
+        """Run one Minecraft player message through AstrBot's conversation pipeline.
+
+        Args:
+            data: Hub ``ai_chat`` payload.
+
+        Returns:
+            ``{"ok": True, "reply": "..."}`` or ``{"ok": False, "error": "..."}``.
+        """
+        player_name = str(data.get("player_name") or "player").strip() or "player"
+        server_name = str(data.get("server_name") or "mc").strip() or "mc"
+        content = str(data.get("content") or "").strip()
+        extra_system = str(data.get("extra_system_prompt") or "").strip()
+        channel = str(data.get("channel") or "public").strip() or "public"
+        is_op = bool(data.get("is_op", False))
+        if not content:
+            return {"ok": False, "error": "空消息"}
+
+        status = "OP玩家" if is_op else "普通玩家"
+        channel_label = "GUI私聊" if channel == "gui" else "公开聊天"
+        user_text = f"{player_name}({status})[{channel_label}]: {content}"
+
+        event = McAiMessageEvent(
+            player_name=player_name,
+            server_name=server_name,
+            message=user_text,
+            extra_system_prompt=extra_system,
+        )
+        await self.context.get_event_queue().put(event)
+        try:
+            timeout = float(getattr(self._hub, "ai_chat_timeout", 180) or 180)
+            reply = await asyncio.wait_for(event.wait_reply(), timeout=timeout)
+        except asyncio.TimeoutError:
+            return {"ok": False, "error": "AstrBot 对话超时"}
+        except Exception as e:
+            logger.error(f"[{_HUB_DISPLAY}] MC AI 对话失败: {e}")
+            return {"ok": False, "error": str(e)}
+
+        reply_text = str(reply or "").strip()
+        if not reply_text:
+            return {"ok": False, "error": "AstrBot 未返回文本"}
+        return {"ok": True, "reply": reply_text}

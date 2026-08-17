@@ -149,7 +149,7 @@ def is_known_arc_command(raw_message: str) -> bool:
 
 SendQQCallback = Callable[[str], Awaitable[None]]
 MuteQQCallback = Callable[[str, int], Awaitable[bool]]
-GetEnmoApiCallback = Callable[[], Any]
+GetArcGuardApiCallback = Callable[[], Any]
 
 
 class ArcHubServer:
@@ -166,7 +166,7 @@ class ArcHubServer:
         send_qq: SendQQCallback,
         set_group_card: Callable[[int, str], Awaitable[None]] | None = None,
         mute_qq: MuteQQCallback | None = None,
-        get_enmo_api: GetEnmoApiCallback | None = None,
+        get_arc_guard_api: GetArcGuardApiCallback | None = None,
         group_names: dict[str, str] | None = None,
         hub_admins: list[str] | None = None,
         sync_group_card: bool = True,
@@ -179,18 +179,23 @@ class ArcHubServer:
         self.send_qq = send_qq
         self.set_group_card = set_group_card
         self.mute_qq = mute_qq
-        self.get_enmo_api = get_enmo_api
+        self.get_arc_guard_api = get_arc_guard_api
         self.group_names = group_names or {}
         self.hub_admins = {str(a) for a in (hub_admins or []) if str(a).strip()}
         self.sync_group_card = bool(sync_group_card)
 
         self.connected_servers: dict[str, ServerConnection] = {}
         self.ws_to_server: dict[ServerConnection, str] = {}
+        self.service_clients: dict[ServerConnection, dict[str, str]] = {}
         self._server_numeric_id_by_name: dict[str, int] = {}
         self._next_server_numeric_id = 1
         self._running = False
         self._server = None
         self._serve_task: asyncio.Task | None = None
+        self.process_ai_chat: Callable[[dict[str, Any]], Awaitable[dict[str, Any]]] | None = (
+            None
+        )
+        self.ai_chat_timeout = 180.0
 
     def _ensure_server_numeric_id(self, server_name: str) -> int:
         if server_name not in self._server_numeric_id_by_name:
@@ -229,6 +234,7 @@ class ArcHubServer:
                 pass
         self.connected_servers.clear()
         self.ws_to_server.clear()
+        self.service_clients.clear()
         server = self._server
         self._server = None
         if server is not None:
@@ -299,42 +305,45 @@ class ArcHubServer:
                 return
 
             server_name = str(data.get("server_name") or "未知服务器")
-            if server_name in self.connected_servers:
-                old_ws = self.connected_servers[server_name]
-                try:
-                    await old_ws.close()
-                except Exception:
-                    pass
-                self.ws_to_server.pop(old_ws, None)
+            role = str(data.get("role") or "server").strip().lower() or "server"
+            is_service = role in {"ai_helper", "service"}
 
-            self.connected_servers[server_name] = websocket
-            self.ws_to_server[websocket] = server_name
-            remote_id = self._ensure_server_numeric_id(server_name)
-            logger.info(
-                f"[弧光EndStone消息中枢] 子服 [{server_name}] 已连接（编号 {remote_id}）"
-            )
+            if is_service:
+                await self._bind_service_client(websocket, server_name, role)
+                logger.info(
+                    f"[弧光EndStone消息中枢] 服务客户端 [{server_name}] role={role} 已连接"
+                )
+                welcome = self._build_welcome_payload(my_server_id=None)
+                await websocket.send(json.dumps(welcome, ensure_ascii=False))
+            else:
+                if server_name in self.connected_servers:
+                    old_ws = self.connected_servers[server_name]
+                    try:
+                        await old_ws.close()
+                    except Exception:
+                        pass
+                    self.ws_to_server.pop(old_ws, None)
 
-            welcome = {
-                "type": "hub_welcome",
-                "connected_servers": list(self.connected_servers.keys()),
-                "hub_server_name": self.hub_server_name,
-                "my_server_id": remote_id,
-                "server_catalog": self.get_server_catalog(),
-                "sync_group_card": self.sync_group_card,
-                "hub_admins": sorted(self.hub_admins),
-            }
-            await websocket.send(json.dumps(welcome, ensure_ascii=False))
+                self.connected_servers[server_name] = websocket
+                self.ws_to_server[websocket] = server_name
+                remote_id = self._ensure_server_numeric_id(server_name)
+                logger.info(
+                    f"[弧光EndStone消息中枢] 子服 [{server_name}] 已连接（编号 {remote_id}）"
+                )
 
-            # Hub WS connect is authoritative (force-killed MC may never send server_start).
-            await self._broadcast_to_others(
-                server_name,
-                {
-                    "type": "cross_server_event",
-                    "from_server": server_name,
-                    "event": "server_connected",
-                },
-            )
-            await self.send_qq(f"[{server_name}]\n服务器已启动！")
+                welcome = self._build_welcome_payload(my_server_id=remote_id)
+                await websocket.send(json.dumps(welcome, ensure_ascii=False))
+
+                # Hub WS connect is authoritative (force-killed MC may never send server_start).
+                await self._broadcast_to_others(
+                    server_name,
+                    {
+                        "type": "cross_server_event",
+                        "from_server": server_name,
+                        "event": "server_connected",
+                    },
+                )
+                await self.send_qq(f"[{server_name}]\n服务器已启动！")
 
             async for message in websocket:
                 try:
@@ -345,11 +354,15 @@ class ArcHubServer:
 
         except websockets.exceptions.ConnectionClosed:
             if server_name:
-                logger.info(f"[弧光EndStone消息中枢] 子服 [{server_name}] 断开连接")
+                kind = "服务客户端" if websocket in self.service_clients else "子服"
+                logger.info(f"[弧光EndStone消息中枢] {kind} [{server_name}] 断开连接")
         except Exception as e:
             logger.error(f"[弧光EndStone消息中枢] 处理子服连接出错: {e}")
         finally:
-            if server_name:
+            was_service = websocket in self.service_clients
+            self.service_clients.pop(websocket, None)
+            self.ws_to_server.pop(websocket, None)
+            if server_name and not was_service:
                 self.connected_servers.pop(server_name, None)
                 # Hub WS drop is authoritative (force-killed MC may never send server_stop).
                 await self._broadcast_to_others(
@@ -364,7 +377,6 @@ class ArcHubServer:
                     await self.send_qq(f"[{server_name}]\n服务器已停止！")
                 except Exception:
                     pass
-            self.ws_to_server.pop(websocket, None)
 
     async def _handle_server_message(
         self, server_name: str, ws: ServerConnection, data: dict
@@ -392,8 +404,102 @@ class ArcHubServer:
         elif msg_type == "restart_vote_online_list_response":
             # Restart vote is handled on MC side via command_forward; ignore here.
             pass
+        elif msg_type == "ai_chat":
+            asyncio.create_task(self._handle_ai_chat(server_name, ws, data))
         else:
             logger.debug(f"[弧光EndStone消息中枢] [{server_name}] 未知类型: {msg_type}")
+
+    def _build_welcome_payload(self, my_server_id: int | None) -> dict[str, Any]:
+        """Build hub_welcome JSON for a newly registered client.
+
+        Args:
+            my_server_id: Numeric id for game servers; None for service clients.
+
+        Returns:
+            Welcome payload including ``ai_chat`` capability flag.
+        """
+        payload: dict[str, Any] = {
+            "type": "hub_welcome",
+            "connected_servers": list(self.connected_servers.keys()),
+            "hub_server_name": self.hub_server_name,
+            "server_catalog": self.get_server_catalog(),
+            "sync_group_card": self.sync_group_card,
+            "hub_admins": sorted(self.hub_admins),
+            "features": ["ai_chat"],
+            "ai_chat": True,
+        }
+        if my_server_id is not None:
+            payload["my_server_id"] = my_server_id
+        return payload
+
+    async def _bind_service_client(
+        self, websocket: ServerConnection, server_name: str, role: str
+    ) -> None:
+        """Register a non-game Hub client (e.g. AI Helper) without fan-out.
+
+        Args:
+            websocket: Client WebSocket.
+            server_name: Client-chosen name (should not collide with game servers).
+            role: Service role such as ``ai_helper``.
+        """
+        for old_ws, meta in list(self.service_clients.items()):
+            if meta.get("name") == server_name:
+                self.service_clients.pop(old_ws, None)
+                try:
+                    await old_ws.close()
+                except Exception:
+                    pass
+                break
+        self.service_clients[websocket] = {"name": server_name, "role": role}
+
+    async def _handle_ai_chat(
+        self, server_name: str, ws: ServerConnection, data: dict
+    ) -> None:
+        """Handle an MC AI chat RPC and reply on the same WebSocket.
+
+        Args:
+            server_name: Registered client name (game server or ``name#ai-helper``).
+            ws: Source WebSocket.
+            data: Incoming ``ai_chat`` payload.
+        """
+        request_id = data.get("request_id")
+        if not self.process_ai_chat:
+            await ws.send(
+                json.dumps(
+                    {
+                        "type": "ai_chat_response",
+                        "request_id": request_id,
+                        "ok": False,
+                        "error": "弧光消息中枢未就绪，无法进行 AstrBot 对话",
+                    },
+                    ensure_ascii=False,
+                )
+            )
+            return
+
+        payload = dict(data)
+        if not str(payload.get("server_name") or "").strip():
+            payload["server_name"] = str(server_name).split("#", 1)[0]
+        try:
+            result = await self.process_ai_chat(payload)
+            if not isinstance(result, dict):
+                result = {"ok": False, "error": "AstrBot 返回格式异常"}
+        except Exception as e:
+            logger.error(f"[弧光EndStone消息中枢] ai_chat 失败: {e}")
+            result = {"ok": False, "error": str(e)}
+
+        await ws.send(
+            json.dumps(
+                {
+                    "type": "ai_chat_response",
+                    "request_id": request_id,
+                    "ok": bool(result.get("ok")),
+                    "reply": result.get("reply") or "",
+                    "error": result.get("error") or "",
+                },
+                ensure_ascii=False,
+            )
+        )
 
     async def _handle_data_rpc(self, ws: ServerConnection, data: dict) -> None:
         request_id = data.get("request_id")
@@ -437,7 +543,7 @@ class ArcHubServer:
             str(data.get("raw_player_name") or "")
         ).strip()
 
-        # Chat: optional ENMO guard before QQ / cross-server fan-out.
+        # Chat: optional Arc Guard before QQ / cross-server fan-out.
         if str(event or "") == "chat":
             blocked = await self._maybe_block_forbidden_chat(
                 origin_server=server_name,
@@ -483,7 +589,7 @@ class ArcHubServer:
         raw_player_name: str,
         message: str,
     ) -> bool:
-        """Run ENMO guard on MC chat; punish and block forward when hit.
+        """Run Arc Guard on MC chat; punish and block forward when hit.
 
         Args:
             origin_server: Connected Hub server name that sent the event.
@@ -494,12 +600,12 @@ class ArcHubServer:
         Returns:
             True if the chat must not be forwarded to QQ / other servers.
         """
-        if not self.get_enmo_api:
+        if not self.get_arc_guard_api:
             return False
         try:
-            api = self.get_enmo_api()
+            api = self.get_arc_guard_api()
         except Exception as e:
-            logger.warning(f"[弧光EndStone消息中枢] 获取 ENMO 护卫 API 失败: {e}")
+            logger.warning(f"[弧光EndStone消息中枢] 获取弧光护卫 API 失败: {e}")
             return False
         if api is None:
             return False
@@ -522,7 +628,7 @@ class ArcHubServer:
         try:
             result = api.check(message, user_id=bound_qq or None)
         except Exception as e:
-            logger.warning(f"[弧光EndStone消息中枢] ENMO 检测失败: {e}")
+            logger.warning(f"[弧光EndStone消息中枢] 弧光护卫检测失败: {e}")
             return False
 
         if not result.get("should_punish"):
@@ -534,7 +640,7 @@ class ArcHubServer:
         minutes = max(1, (mute_seconds + 59) // 60)
 
         logger.info(
-            "[弧光EndStone消息中枢] ENMO 命中 chat server=%s player=%s qq=%s hits=%s",
+            "[弧光EndStone消息中枢] 弧光护卫命中 chat server=%s player=%s qq=%s hits=%s",
             origin_server,
             player_name,
             bound_qq or "-",
@@ -546,35 +652,44 @@ class ArcHubServer:
             try:
                 ok = await self.mute_qq(bound_qq, mute_seconds)
                 logger.info(
-                    "[弧光EndStone消息中枢] ENMO 禁言 qq=%s %ss ok=%s",
+                    "[弧光EndStone消息中枢] 弧光护卫禁言 qq=%s %ss ok=%s",
                     bound_qq,
                     mute_seconds,
                     ok,
                 )
             except Exception as e:
-                logger.error(f"[弧光EndStone消息中枢] ENMO 禁言失败 qq={bound_qq}: {e}")
+                logger.error(
+                    f"[弧光EndStone消息中枢] 弧光护卫禁言失败 qq={bound_qq}: {e}"
+                )
 
         # In-game kill + warning on the originating server (silent, no QQ cmd echo).
+        # Bedrock `/say` rejects `[` (selector/JSON), so use compact tellraw.
         warn_game = reply or f"竟敢辱骂至高无上的ENMO，枪毙{minutes}分钟！"
         kill_name = player_name.replace('"', "").strip()
         if " " in kill_name:
             kill_arg = f'"{kill_name}"'
         else:
             kill_arg = kill_name
+        warn_text = f"[弧光护卫] {kill_name}: {warn_game}"
+        tellraw_json = json.dumps(
+            {"rawtext": [{"text": warn_text}]},
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
         await self._dispatch_silent_console_commands(
             origin_server,
             [
                 f"kill {kill_arg}",
-                f"say [ENMO护卫] {kill_name}: {warn_game}",
+                f"tellraw @a {tellraw_json}",
             ],
         )
 
         # QQ notice (not the original insult).
-        notice = f"[{origin_server}]\n[ENMO护卫] {player_name}: {warn_game}"
+        notice = f"[{origin_server}]\n[弧光护卫] {player_name}: {warn_game}"
         try:
             await self.send_qq(notice)
         except Exception as e:
-            logger.warning(f"[弧光EndStone消息中枢] ENMO 群警告发送失败: {e}")
+            logger.warning(f"[弧光EndStone消息中枢] 弧光护卫群警告发送失败: {e}")
 
         return True
 
@@ -599,7 +714,7 @@ class ArcHubServer:
                     "command_line": f"/cmd {line}",
                     "target_server_id": target_sid,
                     "user_id": "0",
-                    "display_name": "ENMO护卫",
+                    "display_name": "弧光护卫",
                     "group_id": "0",
                     "sender_role": "admin",
                     "is_config_admin": True,

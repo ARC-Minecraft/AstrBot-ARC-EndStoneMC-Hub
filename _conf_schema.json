@@ -70,5 +70,11 @@
     "description": "启动时向群播报",
     "type": "bool",
     "default": true
+  },
+  "ai_chat_timeout": {
+    "description": "MC AI 助手走 AstrBot 对话的超时秒数",
+    "type": "int",
+    "hint": "给 EndstoneMC-ARC-AI-Helper 使用；人格与记忆由 AstrBot 维护",
+    "default": 180
   }
 }

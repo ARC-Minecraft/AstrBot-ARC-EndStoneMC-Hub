@@ -8,12 +8,13 @@ AstrBot 插件（目录名 `astrbot_plugin_endstone_arc`）：QQ ↔ Minecraft �
 
 ## 配套依赖
 
-本中枢与 MC 子服插件**成对使用**，缺一不可：
+本中枢与 MC 子服插件**成对使用**：
 
 | 组件 | 仓库 |
 |------|------|
 | **本仓库（AstrBot 中枢）** | [AstrBot-ARC-EndStoneMC-Hub](https://github.com/ARC-Minecraft/AstrBot-ARC-EndStoneMC-Hub) |
-| **MC 子服客户端** | [EndstoneMC-ARC-QQ-Sync-Plugin](https://github.com/ARC-Minecraft/EndstoneMC-ARC-QQ-Sync-Plugin) |
+| **MC 子服 QQ 互通** | [EndstoneMC-ARC-QQ-Sync-Plugin](https://github.com/ARC-Minecraft/EndstoneMC-ARC-QQ-Sync-Plugin) |
+| **MC 子服 AI 助手（可选）** | [EndstoneMC-ARC-AI-Helper](https://github.com/ARC-Minecraft/EndstoneMC-ARC-AI-Helper) |
 
 ```
 QQ / 其他平台
@@ -31,6 +32,7 @@ EndstoneMC-ARC-QQ-Sync-Plugin（各 MC 子服）
 - 群指令统一要求 `/mc` 前缀（如 `/mc help`、`/mc cmd stop`），剥前缀后再下发子服
 - QQ 绑定数据权威存储（`data.json` / data_rpc）
 - 可选同步群名片（`sync_group_card`）
+- **MC AI 对话 RPC**（`ai_chat`）：[AI Helper](https://github.com/ARC-Minecraft/EndstoneMC-ARC-AI-Helper) 将玩家消息送入 AstrBot 正式对话管线，人格 / 记忆由 AstrBot 维护；服务角色 `ai_helper` 不占用子服编号、也不会播报开停服
 
 ## 安装
 
@@ -52,8 +54,11 @@ AstrBot/data/plugins/astrbot_plugin_endstone_arc/
 | `admins` | 插件管理指令 QQ（`/mc who`、`/mc ban` 等） |
 | `sync_group_card` | 绑定后是否改群名片 |
 | `forward_qq_chat` | 是否转发普通群聊到 MC |
+| `ai_chat_timeout` | MC AI 助手走 AstrBot 对话的超时秒数，默认 180 |
 
 MC 子服侧（[QQ Sync](https://github.com/ARC-Minecraft/EndstoneMC-ARC-QQ-Sync-Plugin)）只需：`hub_host` / `hub_port` / `hub_token`（及可选互不相同的 `server_name`）。
+
+AI Helper 使用独立连接：`register.role = "ai_helper"`，不会占用子服编号，也不会播报开停服。欢迎包含 `ai_chat: true`。需要先升级本中枢，再启用 AI Helper 的 AstrBot 对话。
 
 ## 启停与连接提示
 
@@ -62,6 +67,12 @@ MC 子服侧（[QQ Sync](https://github.com/ARC-Minecraft/EndstoneMC-ARC-QQ-Sync
 - 连上 → 扇出 `server_connected` + QQ「服务器已启动！」
 - 断开 → 扇出 `server_disconnected` + QQ「服务器已停止！」
 - 子服自带的 `server_start` / `server_stop` 不再向 QQ/其他服重复播报
+
+AI Helper 的 `ai_helper` 连接**不走**上述开停服播报。
+
+## 更新日志
+
+- **1.3.0**：新增 `ai_chat` RPC，可把 Minecraft AI 助手消息送进 AstrBot 对话管线（人格 / 记忆由 AstrBot 维护）；`role=ai_helper` 服务连接不占用子服编号。
 
 ## 许可证
 
