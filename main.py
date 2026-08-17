@@ -30,6 +30,14 @@ _MC_AI_IDENTITY_HINT = (
     "优先用工具执行指令；只有工具不可用时，才在可见回复里使用 "
     "[execution_command:实际游戏指令] 标记。"
 )
+_QQ_MC_TOOL_HINT = (
+    "当前是 QQ 对话，已经接入弧光 Minecraft 中枢。"
+    "查询在线、TPS、服务器信息或执行游戏指令时必须调用对应工具，禁止编造。"
+    "有多台 Minecraft 服务器时，先调用 mc_list_servers，再在其它工具里填写 server"
+    "（名称、编号或别名），不要猜测。"
+    "mc_run_command 只对插件管理员、群主和群管理员真正执行；"
+    "普通人要求改世界时直接说明没有权限。"
+)
 
 
 class EndstoneArcMessageCenter(Star):
@@ -85,6 +93,22 @@ class EndstoneArcMessageCenter(Star):
         if not isinstance(raw, dict):
             return {}
         return {str(k): str(v) for k, v in raw.items() if str(v).strip()}
+
+    def _admin_ids(self) -> set[str]:
+        raw = self.config.get("admins") or []
+        return {str(a).strip() for a in raw if str(a).strip()}
+
+    def _server_aliases(self) -> dict[str, str]:
+        raw = self.config.get("server_aliases") or {}
+        if not isinstance(raw, dict):
+            return {}
+        aliases: dict[str, str] = {}
+        for key, value in raw.items():
+            alias = str(key or "").strip()
+            target = str(value or "").strip()
+            if alias and target:
+                aliases[alias.lower()] = target
+        return aliases
 
     async def _start_hub(self) -> None:
         assert self._binding_store is not None
@@ -450,42 +474,170 @@ class EndstoneArcMessageCenter(Star):
     @filter.on_llm_request()
     async def on_llm_request(self, event: AstrMessageEvent, req: ProviderRequest) -> None:
         """Append MC extra system instructions without replacing AstrBot persona."""
-        if not event.get_extra("mc_ai_event"):
+        if event.get_extra("mc_ai_event"):
+            parts: list[str] = [_MC_AI_IDENTITY_HINT]
+            extra = event.get_extra("mc_ai_extra_system")
+            if extra:
+                text = str(extra).strip()
+                if text:
+                    parts.append(text)
+        elif self._is_qq_mc_tool_session(event):
+            parts = [_QQ_MC_TOOL_HINT]
+            listing = self._format_ai_helper_listing()
+            if listing:
+                parts.append("已连接的 Minecraft 服务器：\n" + listing)
+        else:
             return
-        parts: list[str] = [_MC_AI_IDENTITY_HINT]
-        extra = event.get_extra("mc_ai_extra_system")
-        if extra:
-            text = str(extra).strip()
-            if text:
-                parts.append(text)
         prefix = (req.system_prompt or "").rstrip()
         block = "# Minecraft Server Extra Instructions\n\n" + "\n\n".join(parts)
         req.system_prompt = f"{prefix}\n\n{block}\n" if prefix else f"{block}\n"
 
+    def _is_qq_mc_tool_session(self, event: AstrMessageEvent) -> bool:
+        """Return True when this QQ conversation may use Minecraft AI tools."""
+        if event.get_extra("mc_ai_event"):
+            return False
+        gid = str(event.get_group_id() or "").strip()
+        if gid:
+            targets = self._target_group_ids()
+            return (not targets) or gid in targets
+        return str(event.get_sender_id() or "").strip() in self._admin_ids()
+
+    def _qq_sender_role(self, event: AstrMessageEvent) -> str:
+        try:
+            raw_obj = event.message_obj.raw_message if event.message_obj else None
+            if isinstance(raw_obj, dict):
+                return str((raw_obj.get("sender") or {}).get("role") or "member").lower()
+        except Exception:
+            pass
+        return "member"
+
+    def _qq_can_run_command(self, event: AstrMessageEvent) -> bool:
+        uid = str(event.get_sender_id() or "").strip()
+        if uid and uid in self._admin_ids():
+            return True
+        return self._qq_sender_role(event) in {"owner", "admin"}
+
+    def _format_ai_helper_listing(self) -> str:
+        if not self._hub:
+            return ""
+        helpers = self._hub.list_ai_helper_game_names()
+        if not helpers:
+            return ""
+        catalog_ids = {
+            str(item["name"]): int(item["id"])
+            for item in self._hub.get_server_catalog()
+        }
+        lines: list[str] = []
+        for name in helpers:
+            sid = catalog_ids.get(name)
+            if sid is not None:
+                lines.append(f"[{sid}] {name}")
+            else:
+                lines.append(name)
+        return "\n".join(lines)
+
+    def _resolve_tool_server(
+        self, event: AstrMessageEvent, server_hint: str
+    ) -> tuple[str, str]:
+        """Pick the AI Helper game server for a tool call.
+
+        Args:
+            event: Current AstrBot event.
+            server_hint: Optional name, catalog id, or alias.
+
+        Returns:
+            ``(server_name, error)``. Exactly one side is non-empty.
+        """
+        hint = str(server_hint or "").strip()
+        if event.get_extra("mc_ai_event"):
+            origin = str(event.get_extra("mc_ai_server") or "").strip()
+            if origin:
+                return origin, ""
+            return "", "无法确定 Minecraft 服务器名称。"
+        if not self._hub:
+            return "", "弧光消息中枢尚未启动。"
+        helpers = self._hub.list_ai_helper_game_names()
+        if not helpers:
+            return "", "当前没有 Minecraft AI Helper 在线。"
+        if not hint:
+            if len(helpers) == 1:
+                return helpers[0], ""
+            listing = self._format_ai_helper_listing() or "\n".join(helpers)
+            return "", "当前连了多台 Minecraft 服务器，请填写 server（名称、编号或别名）。已连接：\n" + listing
+
+        aliases = self._server_aliases()
+        mapped = aliases.get(hint.lower())
+        if mapped:
+            hint = mapped
+
+        try:
+            sid = int(hint)
+        except ValueError:
+            sid = None
+        if sid is not None:
+            for item in self._hub.get_server_catalog():
+                if int(item["id"]) == sid:
+                    name = str(item["name"])
+                    if self._hub.find_ai_helper_ws(name) is not None:
+                        return name, ""
+                    return "", f"服务器 [{name}] 的 AI Helper 未连接"
+
+        lowered = hint.lower()
+        exact = [name for name in helpers if name.lower() == lowered]
+        if len(exact) == 1:
+            return exact[0], ""
+        partial = [name for name in helpers if lowered in name.lower()]
+        if len(partial) == 1:
+            return partial[0], ""
+        if len(partial) > 1:
+            return "", "server 匹配到多台服，请改用更完整的名称或编号：\n" + "\n".join(partial)
+        listing = self._format_ai_helper_listing() or "\n".join(helpers)
+        return "", f"找不到服务器 [{hint}]。已连接：\n{listing}"
+
     async def _call_mc_ai_tool(
-        self, event: AstrMessageEvent, action: str, args: dict | None = None
+        self,
+        event: AstrMessageEvent,
+        action: str,
+        args: dict | None = None,
+        *,
+        server: str = "",
+        require_admin: bool = False,
     ) -> str:
-        """Run a Minecraft AI Helper tool for the current MC conversation.
+        """Run a Minecraft AI Helper tool for MC chat or an allowed QQ session.
 
         Args:
             event: Current AstrBot event.
             action: Helper action name.
             args: Extra arguments for the action.
+            server: QQ-side server hint; ignored for in-game origin server.
+            require_admin: If True, QQ callers must be hub admin / group owner / admin.
 
         Returns:
             Plain text for the LLM.
         """
-        if not event.get_extra("mc_ai_event"):
-            return "该工具只在 Minecraft 游戏内对话中可用，当前不是 MC 会话。"
+        is_mc = bool(event.get_extra("mc_ai_event"))
+        if not is_mc and not self._is_qq_mc_tool_session(event):
+            return "该工具只在 Minecraft 游戏内对话，或已接入的 QQ 群（管理员执行指令）中可用。"
         if not self._hub:
             return "弧光消息中枢尚未启动。"
-        server_name = str(event.get_extra("mc_ai_server") or "").strip()
-        if not server_name:
-            return "无法确定 Minecraft 服务器名称。"
+        if require_admin and not is_mc and not self._qq_can_run_command(event):
+            return "没有权限：QQ 里执行游戏指令仅限插件管理员、群主和群管理员。"
+
+        server_name, error = self._resolve_tool_server(event, server)
+        if error:
+            return error
         payload = dict(args or {})
-        payload.setdefault("is_op", bool(event.get_extra("mc_ai_is_op")))
-        payload.setdefault("player_name", str(event.get_extra("mc_ai_player_name") or ""))
-        payload.setdefault("player_xuid", str(event.get_extra("mc_ai_xuid") or ""))
+        if is_mc:
+            payload.setdefault("is_op", bool(event.get_extra("mc_ai_is_op")))
+            payload.setdefault("player_name", str(event.get_extra("mc_ai_player_name") or ""))
+            payload.setdefault("player_xuid", str(event.get_extra("mc_ai_xuid") or ""))
+        else:
+            payload.setdefault("is_op", self._qq_can_run_command(event))
+            payload.setdefault(
+                "player_name",
+                str(event.get_sender_name() or event.get_sender_id() or ""),
+            )
+            payload.setdefault("player_xuid", "")
         try:
             resp = await self._hub.call_ai_tool(server_name, action, payload, timeout=20)
         except Exception as e:
@@ -495,49 +647,87 @@ class EndstoneArcMessageCenter(Star):
             return "Minecraft 工具返回格式异常"
         if not resp.get("ok"):
             return str(resp.get("error") or "Minecraft 工具执行失败")
-        return str(resp.get("text") or "").strip() or "（无返回）"
+        text = str(resp.get("text") or "").strip() or "（无返回）"
+        if not is_mc and len(self._hub.list_ai_helper_game_names()) > 1:
+            return f"[{server_name}]\n{text}"
+        return text
+
+    @filter.llm_tool(name="mc_list_servers")
+    async def mc_list_servers(self, event: AstrMessageEvent, reason: str) -> str:
+        """列出当前已连接、可执行工具的 Minecraft 服务器名称与编号。多开服时先调用再填写其它工具的 server。
+
+        Args:
+            reason(string): 简要说明为何查询，例如「要确认打哪台服」
+        """
+        _ = reason
+        if not event.get_extra("mc_ai_event") and not self._is_qq_mc_tool_session(event):
+            return "该工具只在 Minecraft 游戏内对话，或已接入的 QQ 群中可用。"
+        if not self._hub:
+            return "弧光消息中枢尚未启动。"
+        listing = self._format_ai_helper_listing()
+        if not listing:
+            return "当前没有 Minecraft AI Helper 在线。"
+        return "已连接的 Minecraft 服务器：\n" + listing
 
     @filter.llm_tool(name="mc_list_players")
-    async def mc_list_players(self, event: AstrMessageEvent, reason: str) -> str:
-        """查询当前 Minecraft 服务器在线玩家名单与人数。玩家问起谁在线、有没有某某、在线人数时必须调用，禁止编造。
+    async def mc_list_players(
+        self, event: AstrMessageEvent, reason: str, server: str = ""
+    ) -> str:
+        """查询指定 Minecraft 服务器在线玩家名单与人数。玩家问起谁在线、有没有某某、在线人数时必须调用，禁止编造。
 
         Args:
             reason(string): 简要说明为何查询，例如「玩家问谁在线」
+            server(string): 目标服务器名称、编号或别名；游戏内可留空；QQ 多开服必须填
         """
         _ = reason
-        return await self._call_mc_ai_tool(event, "list")
+        return await self._call_mc_ai_tool(event, "list", server=server)
 
     @filter.llm_tool(name="mc_get_tps")
-    async def mc_get_tps(self, event: AstrMessageEvent, reason: str) -> str:
-        """查询当前 Minecraft 服务器 TPS / MSPT 等性能数据。玩家问起卡不卡、TPS、延迟时必须调用，禁止编造。
+    async def mc_get_tps(
+        self, event: AstrMessageEvent, reason: str, server: str = ""
+    ) -> str:
+        """查询指定 Minecraft 服务器 TPS / MSPT 等性能数据。玩家问起卡不卡、TPS、延迟时必须调用，禁止编造。
 
         Args:
             reason(string): 简要说明为何查询，例如「玩家问 TPS」
+            server(string): 目标服务器名称、编号或别名；游戏内可留空；QQ 多开服必须填
         """
         _ = reason
-        return await self._call_mc_ai_tool(event, "tps")
+        return await self._call_mc_ai_tool(event, "tps", server=server)
 
     @filter.llm_tool(name="mc_server_info")
-    async def mc_server_info(self, event: AstrMessageEvent, reason: str) -> str:
-        """查询当前 Minecraft 服务器基本信息（名称、版本、在线人数、运行时长等）。不要编造。
+    async def mc_server_info(
+        self, event: AstrMessageEvent, reason: str, server: str = ""
+    ) -> str:
+        """查询指定 Minecraft 服务器基本信息（名称、版本、在线人数、运行时长等）。不要编造。
 
         Args:
             reason(string): 简要说明为何查询，例如「玩家问服务器信息」
+            server(string): 目标服务器名称、编号或别名；游戏内可留空；QQ 多开服必须填
         """
         _ = reason
-        return await self._call_mc_ai_tool(event, "info")
+        return await self._call_mc_ai_tool(event, "info", server=server)
 
     @filter.llm_tool(name="mc_run_command")
-    async def mc_run_command(self, event: AstrMessageEvent, command: str) -> str:
-        """在当前 Minecraft 服务器控制台执行一条游戏指令。禁止 stop、kill；gamemode 仅 OP 玩家明确要求时可用。需要真实改游戏世界或给效果时调用。
+    async def mc_run_command(
+        self, event: AstrMessageEvent, command: str, server: str = ""
+    ) -> str:
+        """在指定 Minecraft 服务器控制台执行一条游戏指令。禁止 stop、kill；gamemode 仅 OP/管理员明确要求时可用。需要真实改游戏世界或给效果时调用。
 
         Args:
             command(string): 不含斜杠的游戏指令，例如 effect Steve night_vision 30 0 true
+            server(string): 目标服务器名称、编号或别名；游戏内可留空；QQ 多开服必须填
         """
         command_line = str(command or "").strip()
         if not command_line:
             return "指令为空"
-        return await self._call_mc_ai_tool(event, "cmd", {"command": command_line})
+        return await self._call_mc_ai_tool(
+            event,
+            "cmd",
+            {"command": command_line},
+            server=server,
+            require_admin=True,
+        )
 
     async def _process_ai_chat(self, data: dict) -> dict:
         """Run one Minecraft player message through AstrBot's conversation pipeline.

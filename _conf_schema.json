@@ -76,5 +76,18 @@
     "type": "int",
     "hint": "给 EndstoneMC-ARC-AI-Helper 使用；人格与记忆由 AstrBot 维护",
     "default": 180
+  },
+  "server_aliases": {
+    "description": "Minecraft 服务器别名",
+    "type": "object",
+    "hint": "QQ 里说「主服」「丧尸」时映射到 AI Helper 的 server_name，例如 {\"主服\": \"弧光基岩重塑服务器\"}",
+    "items": {
+      "server_name": {
+        "description": "正式服务器名称",
+        "type": "string",
+        "default": ""
+      }
+    },
+    "default": {}
   }
 }

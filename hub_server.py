@@ -506,6 +506,25 @@ class ArcHubServer:
                 return ws
         return None
 
+    def list_ai_helper_game_names(self) -> list[str]:
+        """Return connected AI Helper game-server names without the ``#ai-helper`` suffix.
+
+        Returns:
+            Unique game server names currently registered as ``ai_helper``.
+        """
+        names: list[str] = []
+        seen: set[str] = set()
+        for meta in list(self.service_clients.values()):
+            if str(meta.get("role") or "") != "ai_helper":
+                continue
+            raw = str(meta.get("name") or "").strip()
+            game = raw.split("#", 1)[0].strip() if raw else ""
+            if game and game not in seen:
+                seen.add(game)
+                names.append(game)
+        names.sort()
+        return names
+
     async def call_ai_tool(
         self,
         game_server: str,
