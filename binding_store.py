@@ -78,8 +78,11 @@ class BindingStore:
         return min(pool) if pool else None
 
     def _get_player_by_xuid(self, xuid: str) -> dict[str, Any]:
+        target = str(xuid or "").strip()
+        if not target:
+            return {}
         for data in self._binding_data.values():
-            if isinstance(data, dict) and data.get("xuid") == xuid:
+            if isinstance(data, dict) and str(data.get("xuid") or "").strip() == target:
                 return data
         return {}
 
@@ -101,6 +104,25 @@ class BindingStore:
     def get_player_qq(self, player_name: str) -> str:
         data = self._binding_data.get(player_name) or {}
         return str(data.get("qq") or "")
+
+    def resolve_bound_qq(self, player_name: str, player_xuid: str | None = None) -> str:
+        """Return the bound QQ number for a player, preferring XUID over name.
+
+        Args:
+            player_name: Current game name.
+            player_xuid: Player XUID if known.
+
+        Returns:
+            Bound QQ as a string, or empty when unbound.
+        """
+        data: dict[str, Any] = {}
+        if player_xuid:
+            data = self._get_player_by_xuid(str(player_xuid).strip())
+        if not data and player_name:
+            maybe = self._binding_data.get(player_name)
+            if isinstance(maybe, dict):
+                data = maybe
+        return str(data.get("qq") or "").strip()
 
     def resolve_player_binding(self, display_or_name: str) -> tuple[str, str]:
         """Resolve a display label or raw name to (player_name, qq).

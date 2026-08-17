@@ -7,10 +7,10 @@ import time
 import uuid
 from collections.abc import AsyncGenerator
 
-from astrbot.core.message.components import At, Plain
+from astrbot.core.message.components import Plain
 from astrbot.core.message.message_event_result import MessageChain
 from astrbot.core.platform.astr_message_event import AstrMessageEvent
-from astrbot.core.platform.astrbot_message import AstrBotMessage, Group, MessageMember
+from astrbot.core.platform.astrbot_message import AstrBotMessage, MessageMember
 from astrbot.core.platform.message_type import MessageType
 from astrbot.core.platform.platform_metadata import PlatformMetadata
 
@@ -30,25 +30,14 @@ def sanitize_session_part(value: str) -> str:
     return text[:80]
 
 
-def build_mc_ai_session_id(server_name: str) -> str:
-    """Build the group session id (Minecraft server name as group id).
-
-    Args:
-        server_name: Game server display name.
-
-    Returns:
-        Session id used in ``webchat:GroupMessage:...``.
-    """
-    return sanitize_session_part(server_name)
-
-
 class McAiMessageEvent(AstrMessageEvent):
-    """Group-chat event whose replies are captured instead of sent to QQ.
+    """Private-chat event whose replies are captured instead of sent to QQ.
 
     Mapping for AstrBot / memory plugins:
-    - group id = Minecraft server name
-    - sender id = player XUID (stable across renames)
+    - sender id = bound QQ number, otherwise player XUID
+    - no group id (not a QQ group)
     - nickname = current game name
+    Command tools still know the originating Minecraft server via extras.
     """
 
     def __init__(
@@ -56,14 +45,16 @@ class McAiMessageEvent(AstrMessageEvent):
         *,
         player_name: str,
         player_xuid: str,
+        sender_id: str,
         server_name: str,
         message: str,
         extra_system_prompt: str = "",
         is_op: bool = False,
         channel: str = "public",
+        bound_qq: str = "",
     ) -> None:
-        session_id = build_mc_ai_session_id(server_name)
-        sender_id = sanitize_session_part(player_xuid or f"name_{player_name}")
+        user_id = sanitize_session_part(sender_id or player_xuid or f"name_{player_name}")
+        xuid = sanitize_session_part(player_xuid) if player_xuid else ""
         platform_meta = PlatformMetadata(
             name="webchat",
             description="MC AI Helper via ARC EndStone Hub",
@@ -73,35 +64,34 @@ class McAiMessageEvent(AstrMessageEvent):
         )
 
         msg_obj = AstrBotMessage()
-        msg_obj.type = MessageType.GROUP_MESSAGE
+        msg_obj.type = MessageType.FRIEND_MESSAGE
         msg_obj.self_id = "arc_mc_ai"
-        msg_obj.session_id = session_id
+        msg_obj.session_id = user_id
         msg_obj.message_id = uuid.uuid4().hex
-        msg_obj.sender = MessageMember(user_id=sender_id, nickname=player_name)
-        msg_obj.group = Group(group_id=session_id, group_name=str(server_name))
-        # Leading At makes WakingCheck treat this group message as a bot mention.
-        msg_obj.message = [
-            At(qq="arc_mc_ai", name="天星"),
-            Plain(message),
-        ]
+        msg_obj.sender = MessageMember(user_id=user_id, nickname=player_name)
+        msg_obj.group = None
+        msg_obj.message = [Plain(message)]
         msg_obj.message_str = message
         msg_obj.raw_message = {
             "source": "endstone_mc_ai",
             "server_name": server_name,
             "player_name": player_name,
-            "player_xuid": sender_id,
+            "player_xuid": xuid,
+            "sender_id": user_id,
+            "bound_qq": str(bound_qq or ""),
             "is_op": bool(is_op),
             "channel": channel,
         }
         msg_obj.timestamp = int(time.time())
 
-        super().__init__(message, msg_obj, platform_meta, session_id)
+        super().__init__(message, msg_obj, platform_meta, user_id)
 
         self.is_wake = True
         self.is_at_or_wake_command = True
         self.set_extra("mc_ai_event", True)
         self.set_extra("mc_ai_server", str(server_name))
-        self.set_extra("mc_ai_xuid", sender_id)
+        self.set_extra("mc_ai_xuid", xuid)
+        self.set_extra("mc_ai_qq", str(bound_qq or ""))
         self.set_extra("mc_ai_player_name", str(player_name))
         self.set_extra("mc_ai_is_op", bool(is_op))
         self.set_extra("mc_ai_channel", str(channel))

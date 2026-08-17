@@ -21,9 +21,10 @@ ARC_GUARD_PLUGIN = "astrbot_plugin_arc_guard"
 _HUB_DISPLAY = "弧光EndStone消息中枢"
 _cq_pattern = re.compile(r"\[CQ:(\w+)([^\]]*)\]")
 _MC_AI_IDENTITY_HINT = (
-    "当前是 Minecraft 游戏内对话。"
-    "发送者 ID 是玩家 XUID（改名也不会变），群号是本 Minecraft 服务器名称。"
-    "昵称只是当前游戏名，对人对记忆请以 XUID 为准。"
+    "当前是 Minecraft 游戏内对话，没有 QQ 群号。"
+    "发送者 ID：该玩家若已绑定 QQ 则为 QQ 号（可与 QQ 侧记忆对上同一个人），"
+    "未绑定则使用 XUID。昵称只是当前游戏名。"
+    "执行游戏指令时，在玩家发来这条消息的那台 Minecraft 服务器上执行。"
     "玩家问在线人数、谁在线、TPS、服务器信息或要你执行游戏指令时，"
     "必须调用对应工具查询或执行，禁止凭空编造数字或名单。"
     "优先用工具执行指令；只有工具不可用时，才在可见回复里使用 "
@@ -478,9 +479,7 @@ class EndstoneArcMessageCenter(Star):
             return "该工具只在 Minecraft 游戏内对话中可用，当前不是 MC 会话。"
         if not self._hub:
             return "弧光消息中枢尚未启动。"
-        server_name = str(
-            event.get_extra("mc_ai_server") or event.get_group_id() or ""
-        ).strip()
+        server_name = str(event.get_extra("mc_ai_server") or "").strip()
         if not server_name:
             return "无法确定 Minecraft 服务器名称。"
         payload = dict(args or {})
@@ -559,6 +558,11 @@ class EndstoneArcMessageCenter(Star):
         if not content:
             return {"ok": False, "error": "空消息"}
 
+        bound_qq = ""
+        if self._binding_store is not None:
+            bound_qq = self._binding_store.resolve_bound_qq(player_name, player_xuid)
+        sender_id = bound_qq or player_xuid or f"name_{player_name}"
+
         status = "OP玩家" if is_op else "普通玩家"
         channel_label = "GUI私聊" if channel == "gui" else "公开聊天"
         user_text = f"{player_name}({status})[{channel_label}]: {content}"
@@ -566,11 +570,13 @@ class EndstoneArcMessageCenter(Star):
         event = McAiMessageEvent(
             player_name=player_name,
             player_xuid=player_xuid,
+            sender_id=sender_id,
             server_name=server_name,
             message=user_text,
             extra_system_prompt=extra_system,
             is_op=is_op,
             channel=channel,
+            bound_qq=bound_qq,
         )
         await self.context.get_event_queue().put(event)
         try:

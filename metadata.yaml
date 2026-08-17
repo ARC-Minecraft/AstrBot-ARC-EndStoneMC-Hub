@@ -6,8 +6,8 @@ help: |
   2. MC 子服插件将 hub_host/hub_port 指向本机 AstrBot（默认 19136）。
   3. 群内使用 /mc help、/mc list、/mc cmd …；中枢剥前缀后再转发给 QQ Sync。
   4. 确保 AstrBot 已接入 QQ 平台（如 aiocqhttp / NapCat）。
-  5. 若使用 EndstoneMC-ARC-AI-Helper，将其 hub_host/port 指向本中枢；人格与记忆由 AstrBot 维护。游戏对话用 XUID 对人、用服务器名当群号，并提供 list/tps/info/cmd 工具。
-version: 1.4.0
+  5. 若使用 EndstoneMC-ARC-AI-Helper，将其 hub_host/port 指向本中枢；人格与记忆由 AstrBot 维护。游戏对话优先用已绑定 QQ 号做人的 ID，未绑定则用 XUID；不传群号。工具在消息来源服执行。
+version: 1.5.0
 author: DEVILENMO
 support_platforms:
   - aiocqhttp
