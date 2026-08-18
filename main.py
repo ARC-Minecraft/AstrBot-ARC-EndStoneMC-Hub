@@ -38,14 +38,14 @@ _MC_AI_IDENTITY_HINT = (
     "禁止 effect 玩家名 summon（summon 不是药水效果）。"
 )
 _QQ_MC_TOOL_HINT = (
-    "当前是 QQ 对话，已经接入弧光 Minecraft 中枢。"
+    "当前对话已经接入弧光 Minecraft 中枢，不要求必须带 QQ 群号。"
     "查询在线、TPS、服务器信息或执行游戏指令时必须调用对应工具，禁止编造。"
     "关押玩家用 mc_jail_player，释放用 mc_release_player，查看在押用 mc_list_prisoners。"
     "查玩家位置/近期行为用 mc_skyeye_player，查打架用 mc_skyeye_combat，查坐标附近用 mc_skyeye_location。"
     "有多台 Minecraft 服务器时，先调用 mc_list_servers，再在其它工具里填写 server"
     "（名称、编号或别名），不要猜测。"
-    "mc_run_command 只对插件管理员、群主和群管理员真正执行；"
-    "普通人要求改世界时直接说明没有权限。"
+    "在能识别出 QQ 群主/群管身份的群聊里，mc_run_command / 入狱 / 天眼仅管理员可真正执行；"
+    "其它入口（无私聊群号、其它适配器）可以直接调用。"
     "effect 只能用于药水效果。劈闪电必须用 execute at 玩家名 run summon lightning_bolt ~ ~ ~。"
 )
 
@@ -491,7 +491,7 @@ class EndstoneArcMessageCenter(Star):
                 text = str(extra).strip()
                 if text:
                     parts.append(text)
-        elif self._is_qq_mc_tool_session(event):
+        elif self._is_external_mc_tool_session(event):
             parts = [_QQ_MC_TOOL_HINT]
             listing = self._format_ai_helper_listing()
             if listing:
@@ -502,15 +502,13 @@ class EndstoneArcMessageCenter(Star):
         block = "# Minecraft Server Extra Instructions\n\n" + "\n\n".join(parts)
         req.system_prompt = f"{prefix}\n\n{block}\n" if prefix else f"{block}\n"
 
-    def _is_qq_mc_tool_session(self, event: AstrMessageEvent) -> bool:
-        """Return True when this QQ conversation may use Minecraft AI tools."""
-        if event.get_extra("mc_ai_event"):
-            return False
-        gid = str(event.get_group_id() or "").strip()
-        if gid:
-            targets = self._target_group_ids()
-            return (not targets) or gid in targets
-        return str(event.get_sender_id() or "").strip() in self._admin_ids()
+    def _is_external_mc_tool_session(self, event: AstrMessageEvent) -> bool:
+        """Return True when this AstrBot conversation may use Minecraft AI tools.
+
+        Any platform session is allowed. ``target_groups`` only controls QQ↔MC
+        chat forwarding, not tool access.
+        """
+        return not bool(event.get_extra("mc_ai_event"))
 
     def _qq_sender_role(self, event: AstrMessageEvent) -> str:
         try:
@@ -522,8 +520,17 @@ class EndstoneArcMessageCenter(Star):
         return "member"
 
     def _qq_can_run_command(self, event: AstrMessageEvent) -> bool:
+        """Whether this caller may run world-changing MC tools.
+
+        Hub admins always can. In a QQ group with a known member role, only
+        owner/admin can. Sessions without a group id (other adapters / DMs)
+        are allowed, because the entry may not carry QQ group metadata.
+        """
         uid = str(event.get_sender_id() or "").strip()
         if uid and uid in self._admin_ids():
+            return True
+        gid = str(event.get_group_id() or "").strip()
+        if not gid:
             return True
         return self._qq_sender_role(event) in {"owner", "admin"}
 
@@ -613,25 +620,21 @@ class EndstoneArcMessageCenter(Star):
         server: str = "",
         require_admin: bool = False,
     ) -> str:
-        """Run a Minecraft AI Helper tool for MC chat or an allowed QQ session.
+        """Run a Minecraft AI Helper tool for MC chat or any AstrBot session.
 
         Args:
             event: Current AstrBot event.
             action: Helper action name.
             args: Extra arguments for the action.
-            server: QQ-side server hint; ignored for in-game origin server.
-            require_admin: If True, QQ callers must be hub admin / group owner / admin.
-
-        Returns:
-            Plain text for the LLM.
+            server: External-side server hint; ignored for in-game origin server.
+            require_admin: If True, identifiable QQ group callers must be hub
+                admin / group owner / admin. Sessions without a group id are allowed.
         """
         is_mc = bool(event.get_extra("mc_ai_event"))
-        if not is_mc and not self._is_qq_mc_tool_session(event):
-            return "该工具只在 Minecraft 游戏内对话，或已接入的 QQ 群（管理员执行指令）中可用。"
         if not self._hub:
             return "弧光消息中枢尚未启动。"
         if require_admin and not is_mc and not self._qq_can_run_command(event):
-            return "没有权限：QQ 里执行游戏指令仅限插件管理员、群主和群管理员。"
+            return "没有权限：QQ 群里执行游戏指令仅限插件管理员、群主和群管理员。"
 
         server_name, error = self._resolve_tool_server(event, server)
         if error:
@@ -670,8 +673,6 @@ class EndstoneArcMessageCenter(Star):
             reason(string): 简要说明为何查询，例如「要确认打哪台服」
         """
         _ = reason
-        if not event.get_extra("mc_ai_event") and not self._is_qq_mc_tool_session(event):
-            return "该工具只在 Minecraft 游戏内对话，或已接入的 QQ 群中可用。"
         if not self._hub:
             return "弧光消息中枢尚未启动。"
         listing = self._format_ai_helper_listing()
