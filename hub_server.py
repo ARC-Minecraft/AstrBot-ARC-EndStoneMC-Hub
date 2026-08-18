@@ -81,6 +81,51 @@ def strip_mc_command_prefix(raw_message: str) -> str | None:
     return f"/{rest}"
 
 
+def extract_event_raw_text(event) -> str:
+    """Return the best-effort original user text for a platform message.
+
+    Prefer adapter ``raw_message`` so ``/mc`` survives wake_prefix stripping.
+    """
+    try:
+        message_obj = getattr(event, "message_obj", None)
+        raw_obj = getattr(message_obj, "raw_message", None) if message_obj else None
+        if isinstance(raw_obj, dict):
+            raw_message = str(raw_obj.get("raw_message") or "").strip()
+            if raw_message:
+                return raw_message
+        elif raw_obj is not None:
+            raw_message = str(getattr(raw_obj, "raw_message", "") or "").strip()
+            if raw_message:
+                return raw_message
+    except Exception:
+        pass
+    return str(getattr(event, "message_str", "") or "").strip()
+
+
+def normalize_mc_arc_raw_message(raw_message: str) -> str | None:
+    """Detect ``/mc ...`` even when wake_prefix already removed the leading ``/``.
+
+    Returns:
+        Canonical ``/mc ...`` text, or None if this is not an ARC MC command.
+    """
+    text = (raw_message or "").strip()
+    if not text:
+        return None
+    if strip_mc_command_prefix(text) is not None:
+        return text
+    lowered = text.lower()
+    if lowered == "mc":
+        return "/mc"
+    if lowered.startswith("mc") and (len(text) == 2 or text[2].isspace()):
+        rest = text[2:].lstrip()
+        if rest.startswith("/"):
+            rest = rest.lstrip("/").lstrip()
+        if not rest:
+            return "/mc"
+        return f"/mc {rest}"
+    return None
+
+
 def parse_hub_command_routing(raw_message: str) -> tuple[str, int | None]:
     """Parse optional numeric server id from a QQ group command.
 
@@ -137,7 +182,10 @@ def is_known_arc_command(raw_message: str) -> bool:
     Returns:
         True if the leading command is handled by the message center / MC plugin.
     """
-    normalized = strip_mc_command_prefix(raw_message)
+    mc_raw = normalize_mc_arc_raw_message(raw_message)
+    if mc_raw is None:
+        return False
+    normalized = strip_mc_command_prefix(mc_raw)
     if normalized is None:
         return False
     head = normalized.split(None, 1)[0][1:]
@@ -150,7 +198,10 @@ def is_known_arc_command(raw_message: str) -> bool:
 
 def is_mc_activate_command(raw_message: str) -> bool:
     """Return whether the message is ``/mc activate`` (handled locally, not MC)."""
-    normalized = strip_mc_command_prefix(raw_message)
+    mc_raw = normalize_mc_arc_raw_message(raw_message)
+    if mc_raw is None:
+        return False
+    normalized = strip_mc_command_prefix(mc_raw)
     if normalized is None:
         return False
     head = normalized.split(None, 1)[0][1:].lower()

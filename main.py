@@ -7,6 +7,7 @@ import re
 
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, MessageEventResult, filter
+from astrbot.api.event.filter import CustomFilter
 from astrbot.api.provider import ProviderRequest
 from astrbot.api.star import Context, Star, StarTools
 from astrbot.core.platform.message_session import MessageSession
@@ -14,7 +15,13 @@ from astrbot.core.platform.message_type import MessageType
 
 from .activation_store import ActivationStore
 from .binding_store import BindingStore
-from .hub_server import ArcHubServer, is_known_arc_command, is_mc_activate_command
+from .hub_server import (
+    ArcHubServer,
+    extract_event_raw_text,
+    is_known_arc_command,
+    is_mc_activate_command,
+    normalize_mc_arc_raw_message,
+)
 from .mc_ai_event import McAiMessageEvent
 
 PLUGIN_NAME = "astrbot_plugin_endstone_arc"
@@ -48,6 +55,16 @@ _QQ_MC_TOOL_HINT = (
     "在能识别出 QQ 群主/群管身份的群聊里，mc_run_command / 入狱 / 天眼仅管理员可真正执行。"
     "effect 只能用于药水效果。劈闪电必须用 execute at 玩家名 run summon lightning_bolt ~ ~ ~。"
 )
+
+
+class McArcCommandFilter(CustomFilter):
+    """Intercept ``/mc ...`` before LLM wake, regardless of message type."""
+
+    def filter(self, event: AstrMessageEvent, cfg: AstrBotConfig) -> bool:
+        if event.get_extra("mc_ai_event"):
+            return False
+        raw = extract_event_raw_text(event)
+        return normalize_mc_arc_raw_message(raw) is not None
 
 
 class EndstoneArcMessageCenter(Star):
@@ -115,6 +132,11 @@ class EndstoneArcMessageCenter(Star):
         return bool(uid and uid in self._admin_ids())
 
     async def _reply_to_event(self, event: AstrMessageEvent, text: str) -> None:
+        try:
+            await event.send(MessageEventResult().message(text))
+            return
+        except Exception as error:
+            logger.debug(f"[{_HUB_DISPLAY}] event.send 失败，改用 context.send_message: {error}")
         umo = str(event.unified_msg_origin or "").strip()
         if not umo:
             logger.warning(f"[{_HUB_DISPLAY}] 无法回复：缺少 unified_msg_origin")
@@ -131,6 +153,10 @@ class EndstoneArcMessageCenter(Star):
         umo = str(event.unified_msg_origin or "").strip()
         if umo and store.is_activated(umo):
             return True
+        if umo and ":" in umo:
+            umo_sid = umo.rsplit(":", 1)[-1].strip()
+            if umo_sid and store.is_activated_by_session_id(umo_sid):
+                return True
         for sid in (
             str(event.get_session_id() or "").strip(),
             str(event.get_group_id() or "").strip(),
@@ -170,6 +196,10 @@ class EndstoneArcMessageCenter(Star):
             session_id=session_id,
             label=label,
             by_admin=str(event.get_sender_id() or ""),
+        )
+        logger.info(
+            f"[{_HUB_DISPLAY}] /mc activate session_key={session_key} "
+            f"session_id={session_id} added={added}"
         )
         hub_name = self.config.get("hub_server_name") or _HUB_DISPLAY
         if added:
@@ -474,23 +504,44 @@ class EndstoneArcMessageCenter(Star):
             return text
         return text[: max_length - 1] + "…"
 
-    @filter.event_message_type(filter.EventMessageType.ALL)
-    async def on_mc_activate_command(self, event: AstrMessageEvent):
-        """Handle /mc activate locally; works even without a numeric QQ group id."""
-        if event.get_extra("mc_ai_event"):
+    @filter.custom_filter(McArcCommandFilter, priority=1000)
+    async def on_mc_arc_hub_command(self, event: AstrMessageEvent):
+        """Handle /mc ... locally before LLM chat consumes the message."""
+        raw = extract_event_raw_text(event)
+        mc_raw = normalize_mc_arc_raw_message(raw)
+        if mc_raw is None:
             return
-        raw = (event.message_str or "").strip()
-        try:
-            raw_obj = event.message_obj.raw_message if event.message_obj else None
-            if isinstance(raw_obj, dict):
-                raw_message = str(raw_obj.get("raw_message") or "").strip()
-                if raw_message:
-                    raw = raw_message
-        except Exception:
-            pass
-        if not is_mc_activate_command(raw):
+
+        self._remember_umo(event)
+
+        if is_mc_activate_command(mc_raw):
+            await self._handle_mc_activate(event)
+            event.stop_event()
             return
-        await self._handle_mc_activate(event)
+
+        if not self._hub:
+            await self._reply_to_event(event, f"{_HUB_DISPLAY}尚未启动")
+            event.stop_event()
+            return
+
+        if not is_known_arc_command(mc_raw):
+            await self._reply_to_event(
+                event,
+                f"[{self.config.get('hub_server_name') or _HUB_DISPLAY}]\n"
+                "未知 /mc 指令。发送 /mc help 查看帮助。",
+            )
+            event.stop_event()
+            return
+
+        display_name = self._resolve_display_name(event)
+        gid = str(event.get_group_id() or event.get_session_id() or "").strip()
+        await self._hub.push_command_forward(
+            raw_message=mc_raw,
+            user_id=event.get_sender_id(),
+            display_name=display_name,
+            group_id=gid,
+            sender_role=self._qq_sender_role(event),
+        )
         event.stop_event()
 
     @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE)
@@ -511,22 +562,9 @@ class EndstoneArcMessageCenter(Star):
 
         self._remember_umo(event)
 
-        raw = (event.message_str or "").strip()
-        # Prefer raw OneBot text when available for command detection with CQ noise.
-        try:
-            raw_message = ""
-            if event.message_obj and event.message_obj.raw_message:
-                rm = event.message_obj.raw_message
-                if isinstance(rm, dict):
-                    raw_message = str(rm.get("raw_message") or "")
-                else:
-                    raw_message = str(getattr(rm, "raw_message", "") or "")
-            if raw_message.strip():
-                raw = raw_message.strip()
-        except Exception:
-            pass
+        raw = extract_event_raw_text(event)
 
-        if is_mc_activate_command(raw):
+        if normalize_mc_arc_raw_message(raw) is not None:
             return
 
         display_name = self._resolve_display_name(event)
@@ -539,17 +577,6 @@ class EndstoneArcMessageCenter(Star):
             pass
 
         if raw.startswith("/"):
-            # Only /mc ... ARC commands; leave AstrBot built-ins (e.g. /help) alone.
-            if not is_known_arc_command(raw):
-                return
-            await self._hub.push_command_forward(
-                raw_message=raw,
-                user_id=event.get_sender_id(),
-                display_name=display_name,
-                group_id=gid,
-                sender_role=sender_role,
-            )
-            event.stop_event()
             return
 
         if not bool(self.config.get("forward_qq_chat", True)):
