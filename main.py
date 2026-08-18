@@ -14,6 +14,7 @@ from astrbot.core.platform.message_session import MessageSession
 from astrbot.core.platform.message_type import MessageType
 
 from .activation_store import ActivationStore
+from .admin_store import AdminStore
 from .binding_store import BindingStore
 from .hub_server import (
     ArcHubServer,
@@ -21,6 +22,7 @@ from .hub_server import (
     is_known_arc_command,
     is_mc_activate_command,
     normalize_mc_arc_raw_message,
+    strip_mc_command_prefix,
 )
 from .mc_ai_event import McAiMessageEvent
 
@@ -76,6 +78,7 @@ class EndstoneArcMessageCenter(Star):
         self._hub: ArcHubServer | None = None
         self._binding_store: BindingStore | None = None
         self._activation_store: ActivationStore | None = None
+        self._admin_store: AdminStore | None = None
         self._group_umo: dict[str, str] = {}
         self._platform_id: str = str(self.config.get("platform_id") or "")
         self._start_task: asyncio.Task | None = None
@@ -85,6 +88,8 @@ class EndstoneArcMessageCenter(Star):
         data_dir = StarTools.get_data_dir(PLUGIN_NAME)
         self._binding_store = BindingStore(data_dir)
         self._activation_store = ActivationStore(data_dir)
+        self._admin_store = AdminStore(data_dir, seed_admins=self._config_admin_ids())
+        self._admin_store.seed_super_admins(self._config_super_admin_ids())
         self._hydrate_umos_from_config()
         self._start_task = asyncio.create_task(self._start_hub())
 
@@ -123,13 +128,38 @@ class EndstoneArcMessageCenter(Star):
             return {}
         return {str(k): str(v) for k, v in raw.items() if str(v).strip()}
 
-    def _admin_ids(self) -> set[str]:
+    def _config_admin_ids(self) -> set[str]:
         raw = self.config.get("admins") or []
         return {str(a).strip() for a in raw if str(a).strip()}
+
+    def _config_super_admin_ids(self) -> set[str]:
+        raw = self.config.get("super_admins") or []
+        return {str(a).strip() for a in raw if str(a).strip()}
+
+    def _admin_ids(self) -> set[str]:
+        store = self._admin_store
+        if store is not None:
+            return set(store.list_admins())
+        return self._config_admin_ids()
+
+    def _super_admin_ids(self) -> set[str]:
+        store = self._admin_store
+        if store is not None:
+            return set(store.list_super_admins())
+        supers = self._config_super_admin_ids()
+        return supers or self._config_admin_ids()
 
     def _is_hub_admin(self, event: AstrMessageEvent) -> bool:
         uid = str(event.get_sender_id() or "").strip()
         return bool(uid and uid in self._admin_ids())
+
+    def _is_super_admin(self, event: AstrMessageEvent) -> bool:
+        uid = str(event.get_sender_id() or "").strip()
+        return bool(uid and uid in self._super_admin_ids())
+
+    def _refresh_hub_admins(self) -> None:
+        if self._hub is not None:
+            self._hub.hub_admins = set(self._admin_ids())
 
     async def _reply_to_event(self, event: AstrMessageEvent, text: str) -> None:
         try:
@@ -171,7 +201,7 @@ class EndstoneArcMessageCenter(Star):
                 event,
                 f"[{self.config.get('hub_server_name') or _HUB_DISPLAY}]\n"
                 "❌ 仅插件管理员可使用 /mc activate。\n"
-                "请在插件配置 admins 中填写你的账号 ID。",
+                "请先由超级管理员把你的账号加入管理员列表。",
             )
             return
 
@@ -217,6 +247,96 @@ class EndstoneArcMessageCenter(Star):
             )
         await self._reply_to_event(event, text)
 
+    @staticmethod
+    def _parse_mc_local_command(mc_raw: str) -> tuple[str, list[str]]:
+        normalized = strip_mc_command_prefix(mc_raw) or mc_raw
+        parts = str(normalized or "").strip().split()
+        if not parts:
+            return "", []
+        head = parts[0].lstrip("/").lower()
+        return head, parts[1:]
+
+    def _extract_mentioned_user_ids(self, event: AstrMessageEvent, raw_text: str) -> list[str]:
+        ids: list[str] = []
+        try:
+            for comp in event.get_messages():
+                type_name = type(comp).__name__.lower()
+                if "at" not in type_name:
+                    continue
+                qq = getattr(comp, "qq", None) or getattr(comp, "target", None)
+                if qq:
+                    text = str(qq).strip()
+                    if text and text not in ids:
+                        ids.append(text)
+        except Exception:
+            pass
+        for text in re.findall(r"\[CQ:at,[^\]]*qq=(\d+)[^\]]*\]", raw_text or ""):
+            if text not in ids:
+                ids.append(text)
+        if not ids:
+            for text in re.findall(r"@(\d{5,})", raw_text or ""):
+                if text not in ids:
+                    ids.append(text)
+        return ids
+
+    async def _handle_mc_admin_command(self, event: AstrMessageEvent, mc_raw: str) -> bool:
+        head, args = self._parse_mc_local_command(mc_raw)
+        if head not in {"addadmin", "deladmin", "admins"}:
+            return False
+
+        hub_name = self.config.get("hub_server_name") or _HUB_DISPLAY
+        if head == "admins":
+            admins = sorted(self._admin_ids())
+            supers = sorted(self._super_admin_ids())
+            lines = [f"[{hub_name}]", f"超级管理员: {len(supers)} 人", *[f"• {x}" for x in supers]]
+            lines.append(f"管理员: {len(admins)} 人")
+            lines.extend(f"• {x}" for x in admins if x not in supers)
+            await self._reply_to_event(event, "\n".join(lines))
+            return True
+
+        if not self._is_super_admin(event):
+            await self._reply_to_event(
+                event,
+                f"[{hub_name}]\n❌ 仅超级管理员可任免管理员。",
+            )
+            return True
+
+        store = self._admin_store
+        if store is None:
+            await self._reply_to_event(event, f"[{hub_name}]\n❌ 管理员存储未就绪。")
+            return True
+
+        raw_text = extract_event_raw_text(event)
+        targets = self._extract_mentioned_user_ids(event, raw_text)
+        if not targets and args:
+            candidate = str(args[0]).strip().lstrip("@")
+            if candidate:
+                targets = [candidate]
+        if not targets:
+            usage = "/mc addadmin @QQ号" if head == "addadmin" else "/mc deladmin @QQ号"
+            await self._reply_to_event(event, f"[{hub_name}]\n❌ 请指定目标用户。\n用法：{usage}")
+            return True
+
+        target = targets[0]
+        if head == "addadmin":
+            added = store.add_admin(target)
+            self._refresh_hub_admins()
+            text = (
+                f"[{hub_name}]\n✅ 已添加管理员：{target}"
+                if added
+                else f"[{hub_name}]\nℹ️ 该用户已是管理员：{target}"
+            )
+            await self._reply_to_event(event, text)
+            return True
+
+        removed, reason = store.remove_admin(target)
+        if removed:
+            self._refresh_hub_admins()
+            await self._reply_to_event(event, f"[{hub_name}]\n✅ 已移除管理员：{target}")
+        else:
+            await self._reply_to_event(event, f"[{hub_name}]\n❌ 移除失败：{reason}")
+        return True
+
     def _server_aliases(self) -> dict[str, str]:
         raw = self.config.get("server_aliases") or {}
         if not isinstance(raw, dict):
@@ -231,8 +351,6 @@ class EndstoneArcMessageCenter(Star):
 
     async def _start_hub(self) -> None:
         assert self._binding_store is not None
-        admins_raw = self.config.get("admins") or []
-        admins = [str(a) for a in admins_raw if str(a).strip()]
         self._hub = ArcHubServer(
             host=str(self.config.get("ws_host") or "0.0.0.0"),
             port=int(self.config.get("ws_port") or 19136),
@@ -245,7 +363,7 @@ class EndstoneArcMessageCenter(Star):
             mute_qq=self._mute_qq_all_targets,
             get_arc_guard_api=self._get_arc_guard_api,
             group_names=self._group_names(),
-            hub_admins=admins,
+            hub_admins=sorted(self._admin_ids()),
             sync_group_card=bool(self.config.get("sync_group_card", True)),
         )
         self._hub.process_ai_chat = self._process_ai_chat
@@ -574,6 +692,10 @@ class EndstoneArcMessageCenter(Star):
             event.stop_event()
             return
 
+        if await self._handle_mc_admin_command(event, mc_raw):
+            event.stop_event()
+            return
+
         if not self._hub:
             await self._reply_to_event(event, f"{_HUB_DISPLAY}尚未启动")
             event.stop_event()
@@ -673,6 +795,10 @@ class EndstoneArcMessageCenter(Star):
             )
         if len(activated) > 5:
             lines.append(f"… 另有 {len(activated) - 5} 个")
+        admins = sorted(self._admin_ids())
+        supers = sorted(self._super_admin_ids())
+        lines.append(f"超级管理员: {len(supers)}")
+        lines.append(f"管理员: {len(admins)}")
         yield event.plain_result("\n".join(lines))
 
     @filter.on_llm_request()

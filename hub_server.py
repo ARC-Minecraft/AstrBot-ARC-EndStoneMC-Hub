@@ -25,6 +25,9 @@ ARC_GROUP_COMMANDS = frozenset(
     {
         "help",
         "servers",
+        "admins",
+        "addadmin",
+        "deladmin",
         "list",
         "tps",
         "info",
@@ -767,6 +770,33 @@ class ArcHubServer:
             },
         )
 
+    async def _punish_mc_chat_with_jail(
+        self, origin_server: str, player_name: str, minutes: int, reason: str
+    ) -> tuple[bool, str]:
+        """Try replacing QQ mute with prison time on the origin server."""
+        if not player_name.strip():
+            return False, "玩家名为空"
+        try:
+            resp = await self.call_ai_tool(
+                origin_server,
+                "jail",
+                {
+                    "player_name": player_name,
+                    "duration": str(max(1, int(minutes))),
+                    "reason": reason,
+                    "is_op": True,
+                },
+                timeout=20,
+            )
+        except Exception as e:
+            return False, str(e)
+        if not isinstance(resp, dict):
+            return False, "监狱工具返回格式异常"
+        if not resp.get("ok"):
+            return False, str(resp.get("error") or "关押失败")
+        text = str(resp.get("text") or "").strip() or "关押成功"
+        return True, text
+
     async def _maybe_block_forbidden_chat(
         self,
         *,
@@ -833,8 +863,30 @@ class ArcHubServer:
             hits,
         )
 
-        # Mute bound QQ body in configured groups.
-        if bound_qq and self.mute_qq:
+        jail_reason = "MC聊天违规"
+        jailed = False
+        jail_result = ""
+        if player_name:
+            jailed, jail_result = await self._punish_mc_chat_with_jail(
+                origin_server, player_name, minutes, jail_reason
+            )
+            if jailed:
+                logger.info(
+                    "[弧光EndStone消息中枢] 弧光护卫改为监狱处罚 server=%s player=%s minutes=%s",
+                    origin_server,
+                    player_name,
+                    minutes,
+                )
+            else:
+                logger.info(
+                    "[弧光EndStone消息中枢] 本服未使用监狱处罚，回退群禁言 server=%s player=%s reason=%s",
+                    origin_server,
+                    player_name,
+                    jail_result or "-",
+                )
+
+        # Fall back to QQ mute only when jail is unavailable / failed.
+        if (not jailed) and bound_qq and self.mute_qq:
             try:
                 ok = await self.mute_qq(bound_qq, mute_seconds)
                 logger.info(
@@ -850,7 +902,10 @@ class ArcHubServer:
 
         # In-game kill + warning on the originating server (silent, no QQ cmd echo).
         # Bedrock `/say` rejects `[` (selector/JSON), so use compact tellraw.
-        warn_game = reply or f"竟敢辱骂至高无上的ENMO，枪毙{minutes}分钟！"
+        if jailed:
+            warn_game = reply or f"竟敢辱骂至高无上的ENMO，关进监狱{minutes}分钟！"
+        else:
+            warn_game = reply or f"竟敢辱骂至高无上的ENMO，枪毙{minutes}分钟！"
         kill_name = player_name.replace('"', "").strip()
         if " " in kill_name:
             kill_arg = f'"{kill_name}"'
@@ -872,6 +927,8 @@ class ArcHubServer:
 
         # QQ notice (not the original insult).
         notice = f"[{origin_server}]\n[弧光护卫] {player_name}: {warn_game}"
+        if jailed and jail_result:
+            notice += f"\n[jail] {jail_result}"
         try:
             await self.broadcast_qq(notice)
         except Exception as e:
@@ -953,6 +1010,9 @@ class ArcHubServer:
                 f"[{self.hub_server_name}] 群指令（均以 /mc 开头）：",
                 "/mc help — 显示本帮助",
                 "/mc servers — 查看已连接子服编号",
+                "/mc admins — 查看管理员与超级管理员",
+                "/mc addadmin @QQ — 超级管理员添加管理员",
+                "/mc deladmin @QQ — 超级管理员移除管理员",
                 "/mc list [编号] — 在线玩家",
                 "/mc tps [编号] — TPS / MSPT",
                 "/mc info [编号] — 服务器信息",

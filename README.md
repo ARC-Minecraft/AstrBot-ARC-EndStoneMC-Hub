@@ -52,7 +52,8 @@ AstrBot/data/plugins/astrbot_plugin_endstone_arc/
 | `ws_port` | 与 MC `hub_port` / FRP 一致，默认 19136 |
 | `auth_token` | 与 MC `hub_token` 一致 |
 | `target_groups` | 同步的 QQ 群 |
-| `admins` | 插件管理员 ID（含 `/mc activate`）；填你的账号 |
+| `admins` | 初始管理员 ID；首次启动后会写入持久化 `admins.json` |
+| `super_admins` | 初始超级管理员 ID；可用 `/mc addadmin` / `/mc deladmin` 任免管理员 |
 | `sync_group_card` | 绑定后是否改群名片 |
 | `forward_qq_chat` | 是否转发普通群聊到 MC |
 | `ai_chat_timeout` | MC AI 助手走 AstrBot 对话的超时秒数，默认 180 |
@@ -74,6 +75,7 @@ AI Helper 的 `ai_helper` 连接**不走**上述开停服播报。
 
 ## 更新日志
 
+- **1.6.8**：新增持久化管理员/超级管理员权限模型。`/mc addadmin @QQ`、`/mc deladmin @QQ`、`/mc admins` 由中枢本地处理；超级管理员可任免管理员，管理员与超级管理员其它权限一致。
 - **1.6.7**：MC 聊天/进服/开停服等广播改为发往所有 `/mc activate` 过的会话；`/mc help`、`/mc servers` 等中枢本地指令回复只回来源会话，不再固定往 `target_groups` 发。
 - **1.6.6**：修 `/mc` 指令被 LLM 聊天抢先消费的问题：用高优先级自定义过滤器在唤醒阶段拦截，并兼容 wake_prefix 剥掉开头 `/` 后的 `mc activate` 形式。
 - **1.6.5**：新增 `/mc activate`（仅 `admins` 配置的管理员可用），在本会话激活 Minecraft AI 工具并持久化会话 ID（支持非数字 ID）。未激活会话不可调用工具。
