@@ -148,6 +148,15 @@ def is_known_arc_command(raw_message: str) -> bool:
     return key in ARC_GROUP_COMMANDS
 
 
+def is_mc_activate_command(raw_message: str) -> bool:
+    """Return whether the message is ``/mc activate`` (handled locally, not MC)."""
+    normalized = strip_mc_command_prefix(raw_message)
+    if normalized is None:
+        return False
+    head = normalized.split(None, 1)[0][1:].lower()
+    return head == "activate"
+
+
 SendQQCallback = Callable[[str], Awaitable[None]]
 MuteQQCallback = Callable[[str, int], Awaitable[bool]]
 GetArcGuardApiCallback = Callable[[], Any]
@@ -898,8 +907,10 @@ class ArcHubServer:
                 "/mc cmd [编号] <控制台命令> — 群管理可用",
                 "/mc who <玩家名|QQ> [编号] — 插件管理员",
                 "/mc ban|unban|banlist|unbindqq|reload — 插件管理员",
+                "/mc activate — 插件管理员在本会话激活 Minecraft AI 工具",
                 "",
                 "说明：中枢会剥掉 /mc 后再发给各 MC 子服；省略编号则所有子服执行。",
+                "AI 工具需先 /mc activate；会话 ID 可为非数字字符串。",
             ]
         )
 

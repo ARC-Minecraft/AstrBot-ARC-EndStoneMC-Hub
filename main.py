@@ -12,8 +12,9 @@ from astrbot.api.star import Context, Star, StarTools
 from astrbot.core.platform.message_session import MessageSession
 from astrbot.core.platform.message_type import MessageType
 
+from .activation_store import ActivationStore
 from .binding_store import BindingStore
-from .hub_server import ArcHubServer, is_known_arc_command
+from .hub_server import ArcHubServer, is_known_arc_command, is_mc_activate_command
 from .mc_ai_event import McAiMessageEvent
 
 PLUGIN_NAME = "astrbot_plugin_endstone_arc"
@@ -38,14 +39,13 @@ _MC_AI_IDENTITY_HINT = (
     "禁止 effect 玩家名 summon（summon 不是药水效果）。"
 )
 _QQ_MC_TOOL_HINT = (
-    "当前对话已经接入弧光 Minecraft 中枢，不要求必须带 QQ 群号。"
+    "当前对话已通过 /mc activate 接入弧光 Minecraft 中枢。"
     "查询在线、TPS、服务器信息或执行游戏指令时必须调用对应工具，禁止编造。"
     "关押玩家用 mc_jail_player，释放用 mc_release_player，查看在押用 mc_list_prisoners。"
     "查玩家位置/近期行为用 mc_skyeye_player，查打架用 mc_skyeye_combat，查坐标附近用 mc_skyeye_location。"
     "有多台 Minecraft 服务器时，先调用 mc_list_servers，再在其它工具里填写 server"
     "（名称、编号或别名），不要猜测。"
-    "在能识别出 QQ 群主/群管身份的群聊里，mc_run_command / 入狱 / 天眼仅管理员可真正执行；"
-    "其它入口（无私聊群号、其它适配器）可以直接调用。"
+    "在能识别出 QQ 群主/群管身份的群聊里，mc_run_command / 入狱 / 天眼仅管理员可真正执行。"
     "effect 只能用于药水效果。劈闪电必须用 execute at 玩家名 run summon lightning_bolt ~ ~ ~。"
 )
 
@@ -58,6 +58,7 @@ class EndstoneArcMessageCenter(Star):
         self.config = config or {}
         self._hub: ArcHubServer | None = None
         self._binding_store: BindingStore | None = None
+        self._activation_store: ActivationStore | None = None
         self._group_umo: dict[str, str] = {}
         self._platform_id: str = str(self.config.get("platform_id") or "")
         self._start_task: asyncio.Task | None = None
@@ -66,6 +67,7 @@ class EndstoneArcMessageCenter(Star):
         """Start Hub after plugin load."""
         data_dir = StarTools.get_data_dir(PLUGIN_NAME)
         self._binding_store = BindingStore(data_dir)
+        self._activation_store = ActivationStore(data_dir)
         self._hydrate_umos_from_config()
         self._start_task = asyncio.create_task(self._start_hub())
 
@@ -107,6 +109,83 @@ class EndstoneArcMessageCenter(Star):
     def _admin_ids(self) -> set[str]:
         raw = self.config.get("admins") or []
         return {str(a).strip() for a in raw if str(a).strip()}
+
+    def _is_hub_admin(self, event: AstrMessageEvent) -> bool:
+        uid = str(event.get_sender_id() or "").strip()
+        return bool(uid and uid in self._admin_ids())
+
+    async def _reply_to_event(self, event: AstrMessageEvent, text: str) -> None:
+        umo = str(event.unified_msg_origin or "").strip()
+        if not umo:
+            logger.warning(f"[{_HUB_DISPLAY}] 无法回复：缺少 unified_msg_origin")
+            return
+        try:
+            await self.context.send_message(umo, MessageEventResult().message(text))
+        except Exception as error:
+            logger.warning(f"[{_HUB_DISPLAY}] 回复消息失败: {error}")
+
+    def _is_tool_session_activated(self, event: AstrMessageEvent) -> bool:
+        store = self._activation_store
+        if store is None:
+            return False
+        umo = str(event.unified_msg_origin or "").strip()
+        if umo and store.is_activated(umo):
+            return True
+        for sid in (
+            str(event.get_session_id() or "").strip(),
+            str(event.get_group_id() or "").strip(),
+        ):
+            if sid and store.is_activated_by_session_id(sid):
+                return True
+        return False
+
+    async def _handle_mc_activate(self, event: AstrMessageEvent) -> None:
+        if not self._is_hub_admin(event):
+            await self._reply_to_event(
+                event,
+                f"[{self.config.get('hub_server_name') or _HUB_DISPLAY}]\n"
+                "❌ 仅插件管理员可使用 /mc activate。\n"
+                "请在插件配置 admins 中填写你的账号 ID。",
+            )
+            return
+
+        session_key = str(event.unified_msg_origin or "").strip()
+        session_id = str(event.get_session_id() or event.get_group_id() or "").strip()
+        if not session_key:
+            await self._reply_to_event(
+                event,
+                f"[{self.config.get('hub_server_name') or _HUB_DISPLAY}]\n"
+                "❌ 无法识别当前会话，请稍后再试。",
+            )
+            return
+
+        self._remember_umo(event)
+        label = session_id or session_key
+        store = self._activation_store
+        if store is None:
+            await self._reply_to_event(event, f"[{_HUB_DISPLAY}] 激活存储未就绪。")
+            return
+        added = store.activate(
+            session_key,
+            session_id=session_id,
+            label=label,
+            by_admin=str(event.get_sender_id() or ""),
+        )
+        hub_name = self.config.get("hub_server_name") or _HUB_DISPLAY
+        if added:
+            text = (
+                f"[{hub_name}]\n"
+                "✅ 已在本会话激活 Minecraft AI 工具。\n"
+                f"会话 ID: {label}\n"
+                "此后本对话中的 AI 可调用 mc_list_players、mc_run_command 等工具。"
+            )
+        else:
+            text = (
+                f"[{hub_name}]\n"
+                "ℹ️ 本会话已处于激活状态。\n"
+                f"会话 ID: {label}"
+            )
+        await self._reply_to_event(event, text)
 
     def _server_aliases(self) -> dict[str, str]:
         raw = self.config.get("server_aliases") or {}
@@ -395,6 +474,25 @@ class EndstoneArcMessageCenter(Star):
             return text
         return text[: max_length - 1] + "…"
 
+    @filter.event_message_type(filter.EventMessageType.ALL)
+    async def on_mc_activate_command(self, event: AstrMessageEvent):
+        """Handle /mc activate locally; works even without a numeric QQ group id."""
+        if event.get_extra("mc_ai_event"):
+            return
+        raw = (event.message_str or "").strip()
+        try:
+            raw_obj = event.message_obj.raw_message if event.message_obj else None
+            if isinstance(raw_obj, dict):
+                raw_message = str(raw_obj.get("raw_message") or "").strip()
+                if raw_message:
+                    raw = raw_message
+        except Exception:
+            pass
+        if not is_mc_activate_command(raw):
+            return
+        await self._handle_mc_activate(event)
+        event.stop_event()
+
     @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE)
     async def on_group_message(self, event: AstrMessageEvent):
         """Forward target-group QQ messages/commands to connected MC servers."""
@@ -427,6 +525,9 @@ class EndstoneArcMessageCenter(Star):
                 raw = raw_message.strip()
         except Exception:
             pass
+
+        if is_mc_activate_command(raw):
+            return
 
         display_name = self._resolve_display_name(event)
         sender_role = "member"
@@ -479,6 +580,16 @@ class EndstoneArcMessageCenter(Star):
             lines.append(f"{mark} [{item['id']}] {item['name']}")
         if not catalog:
             lines.append("（暂无注册记录）")
+        activated = (
+            self._activation_store.list_sessions() if self._activation_store else []
+        )
+        lines.append(f"已激活 MC 工具会话: {len(activated)}")
+        for item in activated[:5]:
+            lines.append(
+                f"• {item.get('label') or item.get('session_id') or item.get('session_key')}"
+            )
+        if len(activated) > 5:
+            lines.append(f"… 另有 {len(activated) - 5} 个")
         yield event.plain_result("\n".join(lines))
 
     @filter.on_llm_request()
@@ -503,12 +614,10 @@ class EndstoneArcMessageCenter(Star):
         req.system_prompt = f"{prefix}\n\n{block}\n" if prefix else f"{block}\n"
 
     def _is_external_mc_tool_session(self, event: AstrMessageEvent) -> bool:
-        """Return True when this AstrBot conversation may use Minecraft AI tools.
-
-        Any platform session is allowed. ``target_groups`` only controls QQ↔MC
-        chat forwarding, not tool access.
-        """
-        return not bool(event.get_extra("mc_ai_event"))
+        """Return True when this AstrBot session may use Minecraft AI tools."""
+        if event.get_extra("mc_ai_event"):
+            return False
+        return self._is_tool_session_activated(event)
 
     def _qq_sender_role(self, event: AstrMessageEvent) -> str:
         try:
@@ -523,15 +632,14 @@ class EndstoneArcMessageCenter(Star):
         """Whether this caller may run world-changing MC tools.
 
         Hub admins always can. In a QQ group with a known member role, only
-        owner/admin can. Sessions without a group id (other adapters / DMs)
-        are allowed, because the entry may not carry QQ group metadata.
+        owner/admin can. Sessions without a group id rely on hub admin list.
         """
         uid = str(event.get_sender_id() or "").strip()
         if uid and uid in self._admin_ids():
             return True
         gid = str(event.get_group_id() or "").strip()
         if not gid:
-            return True
+            return False
         return self._qq_sender_role(event) in {"owner", "admin"}
 
     def _format_ai_helper_listing(self) -> str:
@@ -633,8 +741,13 @@ class EndstoneArcMessageCenter(Star):
         is_mc = bool(event.get_extra("mc_ai_event"))
         if not self._hub:
             return "弧光消息中枢尚未启动。"
+        if not is_mc and not self._is_tool_session_activated(event):
+            return (
+                "该会话尚未激活 Minecraft 工具。"
+                "请让插件管理员在本对话发送 /mc activate。"
+            )
         if require_admin and not is_mc and not self._qq_can_run_command(event):
-            return "没有权限：QQ 群里执行游戏指令仅限插件管理员、群主和群管理员。"
+            return "没有权限：执行游戏指令仅限插件管理员、群主和群管理员。"
 
         server_name, error = self._resolve_tool_server(event, server)
         if error:
@@ -675,6 +788,11 @@ class EndstoneArcMessageCenter(Star):
         _ = reason
         if not self._hub:
             return "弧光消息中枢尚未启动。"
+        if not event.get_extra("mc_ai_event") and not self._is_tool_session_activated(event):
+            return (
+                "该会话尚未激活 Minecraft 工具。"
+                "请让插件管理员在本对话发送 /mc activate。"
+            )
         listing = self._format_ai_helper_listing()
         if not listing:
             return "当前没有 Minecraft AI Helper 在线。"

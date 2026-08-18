@@ -49,9 +49,9 @@
     "default": {}
   },
   "admins": {
-    "description": "插件管理员 QQ 号",
+    "description": "插件管理员账号 ID",
     "type": "list",
-    "hint": "可使用 /mc who、/mc ban、/mc unbindqq 等管理指令（群主/群管仍可用 /mc cmd）",
+    "hint": "可使用 /mc activate、/mc who、/mc ban 等管理指令；ID 可为 QQ 号或其它平台用户 ID",
     "default": []
   },
   "sync_group_card": {
