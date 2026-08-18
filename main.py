@@ -29,6 +29,8 @@ _MC_AI_IDENTITY_HINT = (
     "必须调用对应工具查询或执行，禁止凭空编造数字或名单。"
     "要把玩家关进监狱、释放或查看在押名单时，必须调用 mc_jail_player / "
     "mc_release_player / mc_list_prisoners，不要用 mc_run_command 去跑 /jail。"
+    "查询玩家位置、近期行为、打了谁、被谁打、坐标附近发生过什么时，必须调用 "
+    "mc_skyeye_player / mc_skyeye_combat / mc_skyeye_location，禁止编造。"
     "优先调用 mc_run_command 执行其它指令；只有工具不可用时，才在可见回复里使用 "
     "[execution_command:实际游戏指令] 标记。"
     "effect 只能用于药水效果，例如 effect Steve slowness 20 0 true。"
@@ -39,6 +41,7 @@ _QQ_MC_TOOL_HINT = (
     "当前是 QQ 对话，已经接入弧光 Minecraft 中枢。"
     "查询在线、TPS、服务器信息或执行游戏指令时必须调用对应工具，禁止编造。"
     "关押玩家用 mc_jail_player，释放用 mc_release_player，查看在押用 mc_list_prisoners。"
+    "查玩家位置/近期行为用 mc_skyeye_player，查打架用 mc_skyeye_combat，查坐标附近用 mc_skyeye_location。"
     "有多台 Minecraft 服务器时，先调用 mc_list_servers，再在其它工具里填写 server"
     "（名称、编号或别名），不要猜测。"
     "mc_run_command 只对插件管理员、群主和群管理员真正执行；"
@@ -801,6 +804,102 @@ class EndstoneArcMessageCenter(Star):
         """
         _ = reason
         return await self._call_mc_ai_tool(event, "prisoners", server=server)
+
+    @filter.llm_tool(name="mc_skyeye_player")
+    async def mc_skyeye_player(
+        self,
+        event: AstrMessageEvent,
+        player_name: str,
+        minutes: str = "30",
+        action: str = "",
+        server: str = "",
+    ) -> str:
+        """查询天眼：指定玩家现在在哪、是否在领地内，以及近几分钟做过什么（破坏/放置/交互/进出服等）。问起某人在哪、刚干了什么时必须调用，禁止编造。仅管理员。
+
+        Args:
+            player_name(string): 游戏内玩家名
+            minutes(string): 回溯分钟数，默认 30
+            action(string): 可选，限定行为类型，如 BlockBreak / BlockPlace / ActorDamage / PlayerDeath
+            server(string): 目标服务器名称、编号或别名；游戏内可留空；QQ 多开服必须填
+        """
+        name = str(player_name or "").strip()
+        if not name:
+            return "玩家名为空"
+        return await self._call_mc_ai_tool(
+            event,
+            "skyeye_player",
+            {
+                "player_name": name,
+                "minutes": str(minutes or "30").strip(),
+                "action": str(action or "").strip(),
+            },
+            server=server,
+            require_admin=True,
+        )
+
+    @filter.llm_tool(name="mc_skyeye_combat")
+    async def mc_skyeye_combat(
+        self,
+        event: AstrMessageEvent,
+        player_name: str,
+        minutes: str = "30",
+        server: str = "",
+    ) -> str:
+        """查询天眼战斗记录：该玩家打了谁、被谁打了、死亡。问起打架、被打、击杀时必须调用，禁止编造。仅管理员。
+
+        Args:
+            player_name(string): 游戏内玩家名
+            minutes(string): 回溯分钟数，默认 30
+            server(string): 目标服务器名称、编号或别名；游戏内可留空；QQ 多开服必须填
+        """
+        name = str(player_name or "").strip()
+        if not name:
+            return "玩家名为空"
+        return await self._call_mc_ai_tool(
+            event,
+            "skyeye_combat",
+            {"player_name": name, "minutes": str(minutes or "30").strip()},
+            server=server,
+            require_admin=True,
+        )
+
+    @filter.llm_tool(name="mc_skyeye_location")
+    async def mc_skyeye_location(
+        self,
+        event: AstrMessageEvent,
+        x: str,
+        y: str,
+        z: str,
+        radius: str = "8",
+        dimension: str = "",
+        minutes: str = "30",
+        server: str = "",
+    ) -> str:
+        """查询天眼：某坐标附近谁做过什么、是否在领地内。问起这块地发生过什么、谁挖了这里时必须调用。仅管理员。
+
+        Args:
+            x(string): X 坐标
+            y(string): Y 坐标
+            z(string): Z 坐标
+            radius(string): 半径格数，默认 8
+            dimension(string): 维度，如 minecraft:overworld；可留空表示不限
+            minutes(string): 回溯分钟数，默认 30
+            server(string): 目标服务器名称、编号或别名；游戏内可留空；QQ 多开服必须填
+        """
+        return await self._call_mc_ai_tool(
+            event,
+            "skyeye_location",
+            {
+                "x": str(x or "").strip(),
+                "y": str(y or "").strip(),
+                "z": str(z or "").strip(),
+                "radius": str(radius or "8").strip(),
+                "dimension": str(dimension or "").strip(),
+                "minutes": str(minutes or "30").strip(),
+            },
+            server=server,
+            require_admin=True,
+        )
 
     async def _process_ai_chat(self, data: dict) -> dict:
         """Run one Minecraft player message through AstrBot's conversation pipeline.
