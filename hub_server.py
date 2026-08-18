@@ -208,7 +208,8 @@ def is_mc_activate_command(raw_message: str) -> bool:
     return head == "activate"
 
 
-SendQQCallback = Callable[[str], Awaitable[None]]
+SendQQBroadcastCallback = Callable[[str], Awaitable[None]]
+SendQQReplyCallback = Callable[[str, str], Awaitable[None]]
 MuteQQCallback = Callable[[str, int], Awaitable[bool]]
 GetArcGuardApiCallback = Callable[[], Any]
 
@@ -224,7 +225,8 @@ class ArcHubServer:
         token: str,
         hub_server_name: str,
         binding_store: BindingStore,
-        send_qq: SendQQCallback,
+        broadcast_qq: SendQQBroadcastCallback,
+        reply_qq: SendQQReplyCallback,
         set_group_card: Callable[[int, str], Awaitable[None]] | None = None,
         mute_qq: MuteQQCallback | None = None,
         get_arc_guard_api: GetArcGuardApiCallback | None = None,
@@ -237,7 +239,8 @@ class ArcHubServer:
         self.token = token or ""
         self.hub_server_name = hub_server_name or "弧光EndStone消息中枢"
         self.binding_store = binding_store
-        self.send_qq = send_qq
+        self.broadcast_qq = broadcast_qq
+        self.reply_qq = reply_qq
         self.set_group_card = set_group_card
         self.mute_qq = mute_qq
         self.get_arc_guard_api = get_arc_guard_api
@@ -406,7 +409,7 @@ class ArcHubServer:
                         "event": "server_connected",
                     },
                 )
-                await self.send_qq(f"[{server_name}]\n服务器已启动！")
+                await self.broadcast_qq(f"[{server_name}]\n服务器已启动！")
 
             async for message in websocket:
                 try:
@@ -439,7 +442,7 @@ class ArcHubServer:
                     },
                 )
                 try:
-                    await self.send_qq(f"[{server_name}]\n服务器已停止！")
+                    await self.broadcast_qq(f"[{server_name}]\n服务器已停止！")
                 except Exception:
                     pass
 
@@ -452,7 +455,7 @@ class ArcHubServer:
         elif msg_type == "api_send":
             text = data.get("text", "")
             if text:
-                await self.send_qq(strip_minecraft_format_codes(str(text)))
+                await self.broadcast_qq(strip_minecraft_format_codes(str(text)))
         elif msg_type == "ping":
             await ws.send(json.dumps({"type": "pong"}))
         elif msg_type == "data_rpc":
@@ -746,7 +749,7 @@ class ArcHubServer:
             str(playtime_str),
         )
         if qq_msg:
-            await self.send_qq(qq_msg)
+            await self.broadcast_qq(qq_msg)
 
         # server_start/stop still go to QQ above; cross-server connection status
         # uses hub WS server_connected/disconnected (reliable on force-kill).
@@ -870,7 +873,7 @@ class ArcHubServer:
         # QQ notice (not the original insult).
         notice = f"[{origin_server}]\n[弧光护卫] {player_name}: {warn_game}"
         try:
-            await self.send_qq(notice)
+            await self.broadcast_qq(notice)
         except Exception as e:
             logger.warning(f"[弧光EndStone消息中枢] 弧光护卫群警告发送失败: {e}")
 
@@ -1015,6 +1018,7 @@ class ArcHubServer:
         user_id: str | int,
         display_name: str,
         group_id: str | int,
+        session_key: str = "",
         sender_role: str = "member",
     ) -> None:
         """Forward a QQ group command to connected MC servers.
@@ -1023,9 +1027,11 @@ class ArcHubServer:
             raw_message: Original command text.
             user_id: QQ user id.
             display_name: Bound player name or nickname.
-            group_id: Source group id.
+            group_id: Source group / session id for replies.
+            session_key: ``unified_msg_origin`` of the command source.
             sender_role: OneBot sender role.
         """
+        reply_target = str(session_key or group_id or "").strip()
         # Normalize /mc ... -> /... before routing / forwarding to MC.
         internal = strip_mc_command_prefix(raw_message)
         forward_message = internal if internal is not None else raw_message.strip()
@@ -1033,20 +1039,21 @@ class ArcHubServer:
         if forward_message == "/servers":
             catalog = self.get_server_catalog()
             if not self.connected_servers:
-                await self.send_qq(
-                    f"[{self.hub_server_name}]\n当前没有已连接的 Minecraft 子服。"
+                await self.reply_qq(
+                    reply_target,
+                    f"[{self.hub_server_name}]\n当前没有已连接的 Minecraft 子服。",
                 )
                 return
             lines = [f"[{self.hub_server_name}]\n当前子服列表:"]
             for item in catalog:
                 online = "✅" if item["name"] in self.connected_servers else "·"
                 lines.append(f"[{item['id']}] {item['name']} {online}")
-            await self.send_qq("\n".join(lines))
+            await self.reply_qq(reply_target, "\n".join(lines))
             return
 
         # Hub answers /mc help so QQ users see /mc-prefixed usage; MC keeps /help.
         if forward_message == "/help":
-            await self.send_qq(self.format_group_help_text())
+            await self.reply_qq(reply_target, self.format_group_help_text())
             return
 
         eff_line, route_sid = parse_hub_command_routing(forward_message)
@@ -1057,16 +1064,18 @@ class ArcHubServer:
                 if c["name"] in self.connected_servers
             }
             if mc_ids and route_sid not in mc_ids:
-                await self.send_qq(
+                await self.reply_qq(
+                    reply_target,
                     f"[{self.hub_server_name}]\n"
                     f"❌ 无编号 {route_sid} 的服务器。\n"
-                    f"💡 发送 /mc servers 查看当前子服列表"
+                    f"💡 发送 /mc servers 查看当前子服列表",
                 )
                 return
 
         if not self.connected_servers:
-            await self.send_qq(
-                f"[{self.hub_server_name}]\n❌ 当前没有已连接的 Minecraft 子服。"
+            await self.reply_qq(
+                reply_target,
+                f"[{self.hub_server_name}]\n❌ 当前没有已连接的 Minecraft 子服。",
             )
             return
 

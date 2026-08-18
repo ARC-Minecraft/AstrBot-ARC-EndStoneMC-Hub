@@ -239,7 +239,8 @@ class EndstoneArcMessageCenter(Star):
             token=str(self.config.get("auth_token") or ""),
             hub_server_name=str(self.config.get("hub_server_name") or _HUB_DISPLAY),
             binding_store=self._binding_store,
-            send_qq=self._send_to_all_target_groups,
+            broadcast_qq=self._broadcast_to_activated_sessions,
+            reply_qq=self._reply_to_session,
             set_group_card=self._set_group_card_all_targets,
             mute_qq=self._mute_qq_all_targets,
             get_arc_guard_api=self._get_arc_guard_api,
@@ -257,7 +258,7 @@ class EndstoneArcMessageCenter(Star):
             # Delay slightly so platform adapters are ready.
             await asyncio.sleep(2)
             try:
-                await self._send_to_all_target_groups(
+                await self._broadcast_to_activated_sessions(
                     f"[{self.config.get('hub_server_name') or _HUB_DISPLAY}]\n"
                     f"[{_HUB_DISPLAY}] 已启动"
                 )
@@ -393,7 +394,67 @@ class EndstoneArcMessageCenter(Star):
                     f"[{_HUB_DISPLAY}] 改群名片失败 group={gid} user={user_id}: {e}"
                 )
 
+    async def _send_message_to_umo(self, umo: str, text: str, *, label: str = "") -> None:
+        umo = str(umo or "").strip()
+        if not umo:
+            return
+        try:
+            ok = await self.context.send_message(
+                umo, MessageEventResult().message(text)
+            )
+            if not ok:
+                logger.warning(
+                    f"[{_HUB_DISPLAY}] 发送失败（未找到平台）: {label or umo}"
+                )
+        except Exception as error:
+            logger.error(f"[{_HUB_DISPLAY}] 发送到 {label or umo} 异常: {error}")
+
+    def _resolve_session_umo(self, target: str) -> str | None:
+        key = str(target or "").strip()
+        if not key:
+            return None
+        remembered = self._group_umo.get(key)
+        if remembered:
+            return remembered
+        store = self._activation_store
+        if store is not None and store.is_activated(key):
+            return key
+        if store is not None:
+            for item in store.list_sessions():
+                session_key = str(item.get("session_key") or "").strip()
+                session_id = str(item.get("session_id") or "").strip()
+                if key in {session_key, session_id} and session_key:
+                    return session_key
+        return None
+
+    async def _broadcast_to_activated_sessions(self, text: str) -> None:
+        store = self._activation_store
+        if store is None:
+            return
+        sessions = store.list_sessions()
+        if not sessions:
+            logger.debug(f"[{_HUB_DISPLAY}] 无已激活会话，跳过广播")
+            return
+        seen: set[str] = set()
+        for item in sessions:
+            umo = str(item.get("session_key") or "").strip()
+            if not umo or umo in seen:
+                continue
+            seen.add(umo)
+            label = str(item.get("label") or item.get("session_id") or umo)
+            await self._send_message_to_umo(umo, text, label=label)
+
+    async def _reply_to_session(self, target: str, text: str) -> None:
+        umo = self._resolve_session_umo(target)
+        if not umo:
+            logger.warning(
+                f"[{_HUB_DISPLAY}] 无法回复会话 {target}：未找到 unified_msg_origin"
+            )
+            return
+        await self._send_message_to_umo(umo, text, label=str(target))
+
     async def _send_to_all_target_groups(self, text: str) -> None:
+        """Legacy broadcast to configured target_groups (admin / mute helpers)."""
         groups = self._target_group_ids()
         if not groups:
             logger.warning("[弧光EndStone消息中枢] 未配置 target_groups，无法发往 QQ")
@@ -406,16 +467,7 @@ class EndstoneArcMessageCenter(Star):
                     "请先在该群发一条消息或配置 platform_id"
                 )
                 continue
-            try:
-                ok = await self.context.send_message(
-                    umo, MessageEventResult().message(text)
-                )
-                if not ok:
-                    logger.warning(
-                        f"[弧光EndStone消息中枢] 发送到群 {gid} 失败（未找到平台）: {umo}"
-                    )
-            except Exception as e:
-                logger.error(f"[弧光EndStone消息中枢] 发送到群 {gid} 异常: {e}")
+            await self._send_message_to_umo(umo, text, label=str(gid))
 
     def _resolve_umo(self, group_id: str | int) -> str | None:
         gid = str(group_id)
@@ -429,12 +481,15 @@ class EndstoneArcMessageCenter(Star):
         return umo
 
     def _remember_umo(self, event: AstrMessageEvent) -> None:
-        gid = event.get_group_id()
-        if not gid:
+        umo = str(event.unified_msg_origin or "").strip()
+        if not umo:
             return
-        self._group_umo[str(gid)] = event.unified_msg_origin
         if not self._platform_id:
             self._platform_id = event.get_platform_id()
+        self._group_umo[umo] = umo
+        for key in (event.get_group_id(), event.get_session_id()):
+            if key:
+                self._group_umo[str(key)] = umo
 
     def _resolve_display_name(self, event: AstrMessageEvent) -> str:
         assert self._binding_store is not None
@@ -540,6 +595,7 @@ class EndstoneArcMessageCenter(Star):
             user_id=event.get_sender_id(),
             display_name=display_name,
             group_id=gid,
+            session_key=str(event.unified_msg_origin or ""),
             sender_role=self._qq_sender_role(event),
         )
         event.stop_event()
@@ -557,7 +613,7 @@ class EndstoneArcMessageCenter(Star):
             return
 
         targets = self._target_group_ids()
-        if targets and str(gid) not in targets:
+        if targets and str(gid) not in targets and not self._is_tool_session_activated(event):
             return
 
         self._remember_umo(event)

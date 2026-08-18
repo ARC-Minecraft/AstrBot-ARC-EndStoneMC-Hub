@@ -74,6 +74,7 @@ AI Helper 的 `ai_helper` 连接**不走**上述开停服播报。
 
 ## 更新日志
 
+- **1.6.7**：MC 聊天/进服/开停服等广播改为发往所有 `/mc activate` 过的会话；`/mc help`、`/mc servers` 等中枢本地指令回复只回来源会话，不再固定往 `target_groups` 发。
 - **1.6.6**：修 `/mc` 指令被 LLM 聊天抢先消费的问题：用高优先级自定义过滤器在唤醒阶段拦截，并兼容 wake_prefix 剥掉开头 `/` 后的 `mc activate` 形式。
 - **1.6.5**：新增 `/mc activate`（仅 `admins` 配置的管理员可用），在本会话激活 Minecraft AI 工具并持久化会话 ID（支持非数字 ID）。未激活会话不可调用工具。
 - **1.6.4**：Minecraft 工具不再限定 `target_groups` / QQ 群号；其它适配器或无私聊群号的入口也能调用。QQ 群里改世界仍仅管理员。
