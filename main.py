@@ -27,7 +27,9 @@ _MC_AI_IDENTITY_HINT = (
     "执行游戏指令时，在玩家发来这条消息的那台 Minecraft 服务器上执行。"
     "玩家问在线人数、谁在线、TPS、服务器信息或要你执行游戏指令时，"
     "必须调用对应工具查询或执行，禁止凭空编造数字或名单。"
-    "优先调用 mc_run_command 执行指令；只有工具不可用时，才在可见回复里使用 "
+    "要把玩家关进监狱、释放或查看在押名单时，必须调用 mc_jail_player / "
+    "mc_release_player / mc_list_prisoners，不要用 mc_run_command 去跑 /jail。"
+    "优先调用 mc_run_command 执行其它指令；只有工具不可用时，才在可见回复里使用 "
     "[execution_command:实际游戏指令] 标记。"
     "effect 只能用于药水效果，例如 effect Steve slowness 20 0 true。"
     "劈闪电必须用 execute at 玩家名 run summon lightning_bolt ~ ~ ~ ，"
@@ -36,6 +38,7 @@ _MC_AI_IDENTITY_HINT = (
 _QQ_MC_TOOL_HINT = (
     "当前是 QQ 对话，已经接入弧光 Minecraft 中枢。"
     "查询在线、TPS、服务器信息或执行游戏指令时必须调用对应工具，禁止编造。"
+    "关押玩家用 mc_jail_player，释放用 mc_release_player，查看在押用 mc_list_prisoners。"
     "有多台 Minecraft 服务器时，先调用 mc_list_servers，再在其它工具里填写 server"
     "（名称、编号或别名），不要猜测。"
     "mc_run_command 只对插件管理员、群主和群管理员真正执行；"
@@ -732,6 +735,72 @@ class EndstoneArcMessageCenter(Star):
             server=server,
             require_admin=True,
         )
+
+    @filter.llm_tool(name="mc_jail_player")
+    async def mc_jail_player(
+        self,
+        event: AstrMessageEvent,
+        player_name: str,
+        duration: str = "",
+        reason: str = "",
+        server: str = "",
+    ) -> str:
+        """把指定玩家关进监狱（一键入狱）。玩家要求关人、入狱、坐牢、禁闭时必须调用，不要用 mc_run_command 执行 /jail。时长单位为分钟，可填 -1 或 无期；不填则用服务器默认时长。
+
+        Args:
+            player_name(string): 要关押的游戏内玩家名
+            duration(string): 刑期分钟数，或 -1/life/无期；留空则用默认一键入狱时长
+            reason(string): 入狱原因，可留空
+            server(string): 目标服务器名称、编号或别名；游戏内可留空；QQ 多开服必须填
+        """
+        name = str(player_name or "").strip()
+        if not name:
+            return "玩家名为空"
+        return await self._call_mc_ai_tool(
+            event,
+            "jail",
+            {
+                "player_name": name,
+                "duration": str(duration or "").strip(),
+                "reason": str(reason or "").strip(),
+            },
+            server=server,
+            require_admin=True,
+        )
+
+    @filter.llm_tool(name="mc_release_player")
+    async def mc_release_player(
+        self, event: AstrMessageEvent, player_name: str, server: str = ""
+    ) -> str:
+        """释放监狱中的指定玩家。玩家要求放人、出狱、释放时调用。
+
+        Args:
+            player_name(string): 要释放的游戏内玩家名
+            server(string): 目标服务器名称、编号或别名；游戏内可留空；QQ 多开服必须填
+        """
+        name = str(player_name or "").strip()
+        if not name:
+            return "玩家名为空"
+        return await self._call_mc_ai_tool(
+            event,
+            "release",
+            {"player_name": name},
+            server=server,
+            require_admin=True,
+        )
+
+    @filter.llm_tool(name="mc_list_prisoners")
+    async def mc_list_prisoners(
+        self, event: AstrMessageEvent, reason: str, server: str = ""
+    ) -> str:
+        """查询指定 Minecraft 服务器当前在押玩家名单。问起谁在坐牢、监狱里有谁时必须调用，禁止编造。
+
+        Args:
+            reason(string): 简要说明为何查询，例如「玩家问谁在坐牢」
+            server(string): 目标服务器名称、编号或别名；游戏内可留空；QQ 多开服必须填
+        """
+        _ = reason
+        return await self._call_mc_ai_tool(event, "prisoners", server=server)
 
     async def _process_ai_chat(self, data: dict) -> dict:
         """Run one Minecraft player message through AstrBot's conversation pipeline.

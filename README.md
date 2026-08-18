@@ -33,7 +33,7 @@ EndstoneMC-ARC-QQ-Sync-Plugin（各 MC 子服）
 - QQ 绑定数据权威存储（`data.json` / data_rpc）
 - 可选同步群名片（`sync_group_card`）
 - **MC AI 对话 RPC**（`ai_chat`）：[AI Helper](https://github.com/ARC-Minecraft/EndstoneMC-ARC-AI-Helper) 将玩家消息送入 AstrBot 正式对话管线，人格 / 记忆由 AstrBot 维护。身份映射：已绑定则发送者 ID = **QQ 号**，未绑定则用 **XUID**；不传群号。服务角色 `ai_helper` 不占用子服编号、也不会播报开停服
-- **MC AI 服务器工具**（`ai_tool`）：给大模型提供 `mc_list_servers` / `mc_list_players` / `mc_get_tps` / `mc_server_info` / `mc_run_command`。游戏内打在消息来源服；已配置的 QQ 群也可调用，多开服通过 `server`（名称/编号/别名）指定。`mc_run_command` 在 QQ 里仅插件管理员、群主、群管可真正执行（`stop`/`kill` 仍禁止，`gamemode` 仅 OP/管理员）
+- **MC AI 服务器工具**（`ai_tool`）：给大模型提供 `mc_list_servers` / `mc_list_players` / `mc_get_tps` / `mc_server_info` / `mc_run_command` / `mc_jail_player` / `mc_release_player` / `mc_list_prisoners`。游戏内打在消息来源服；已配置的 QQ 群也可调用，多开服通过 `server`（名称/编号/别名）指定。`mc_run_command`、`mc_jail_player`、`mc_release_player` 在 QQ 里仅插件管理员、群主、群管可真正执行（`stop`/`kill` 仍禁止，`gamemode` 仅 OP/管理员）
 
 ## 安装
 
@@ -74,6 +74,7 @@ AI Helper 的 `ai_helper` 连接**不走**上述开停服播报。
 
 ## 更新日志
 
+- **1.6.2**：新增监狱一键入狱工具 `mc_jail_player` / `mc_release_player` / `mc_list_prisoners`，需游戏内监狱插件 ≥ 0.0.2 与 AI Helper ≥ 1.2.4。QQ 里入狱/释放与执行指令一样仅管理员。
 - **1.6.1**：工具说明补充劈闪电正确格式 `execute at 玩家名 run summon lightning_bolt ~ ~ ~`，避免写成 `effect 玩家名 summon`。
 - **1.6.0**：QQ 群聊也可使用 Minecraft 工具（查在线 / TPS / 信息 / 执行指令）。多开服用 `server` 指定目标；执行指令仅插件管理员、群主和群管。需游戏内 AI Helper 在线。
 - **1.5.1**：服务连接被同名替换时写日志，便于排查多开服 AI Helper 互踢。
