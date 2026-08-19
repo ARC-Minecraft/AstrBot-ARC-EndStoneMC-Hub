@@ -42,7 +42,7 @@ _MC_AI_IDENTITY_HINT = (
     "查询玩家位置、近期行为、打了谁、被谁打、坐标附近发生过什么时，必须调用 "
     "mc_skyeye_player / mc_skyeye_combat / mc_skyeye_location，禁止编造。"
     "天眼不要求玩家在线。不知道在哪台服时 server 必须留空，工具会搜索全部已连接服务器。"
-    "查一天把 minutes 设为 1440 或「一天」，不要用默认 30 分钟。"
+    "minutes 必须按用户说的查询时长自己换算成分钟数再传入，例如一天=1440、一小时=60；用户没说时长才用 30。"
     "优先调用 mc_run_command 执行其它指令；只有工具不可用时，才在可见回复里使用 "
     "[execution_command:实际游戏指令] 标记。"
     "effect 只能用于药水效果，例如 effect Steve slowness 20 0 true。"
@@ -55,7 +55,8 @@ _QQ_MC_TOOL_HINT = (
     "关押玩家用 mc_jail_player，释放用 mc_release_player，查看在押用 mc_list_prisoners。"
     "查玩家位置/近期行为用 mc_skyeye_player，查打架用 mc_skyeye_combat，查坐标附近用 mc_skyeye_location。"
     "天眼不要求玩家在线。不知道人在哪台服时，server 必须留空（会搜全部已连接服务器），不要猜服名。"
-    "查一天把 minutes 设为 1440 或「一天」。改世界/查在线等其它工具在多开服时仍须填写 server。"
+    "调用天眼时必须自己把用户说的时长换算成分钟写入 minutes，例如一天=1440、一小时=60。"
+    "改世界/查在线等其它工具在多开服时仍须填写 server。"
     "有多台 Minecraft 服务器时，除天眼外先调用 mc_list_servers，再填写 server"
     "（名称、编号或别名），不要猜测。"
     "在能识别出 QQ 群主/群管身份的群聊里，mc_run_command / 入狱 / 天眼仅管理员可真正执行。"
@@ -1583,7 +1584,7 @@ class EndstoneArcMessageCenter(Star):
             return "没有权限：执行游戏指令仅限插件管理员、群主和群管理员。"
 
         payload = dict(args or {})
-        if "minutes" in payload:
+        if action in _SKYEYE_FANOUT_ACTIONS and "minutes" in payload:
             payload["minutes"] = str(
                 self._parse_duration_minutes(str(payload.get("minutes") or ""))
             )
@@ -1646,13 +1647,9 @@ class EndstoneArcMessageCenter(Star):
         return text
 
     @filter.llm_tool(name="mc_list_servers")
-    async def mc_list_servers(self, event: AstrMessageEvent, reason: str) -> str:
+    async def mc_list_servers(self, event: AstrMessageEvent) -> str:
         """列出当前已连接、可执行工具的 Minecraft 服务器名称与编号。多开服时先调用再填写其它工具的 server。
-
-        Args:
-            reason(string): 简要说明为何查询，例如「要确认打哪台服」
         """
-        _ = reason
         if not self._hub:
             return "弧光消息中枢尚未启动。"
         if not event.get_extra("mc_ai_event") and not self._is_tool_session_activated(
@@ -1669,41 +1666,35 @@ class EndstoneArcMessageCenter(Star):
 
     @filter.llm_tool(name="mc_list_players")
     async def mc_list_players(
-        self, event: AstrMessageEvent, reason: str, server: str = ""
+        self, event: AstrMessageEvent, server: str = ""
     ) -> str:
         """查询指定 Minecraft 服务器在线玩家名单与人数。玩家问起谁在线、有没有某某、在线人数时必须调用，禁止编造。
 
         Args:
-            reason(string): 简要说明为何查询，例如「玩家问谁在线」
             server(string): 目标服务器名称、编号或别名；游戏内可留空；QQ 多开服必须填
         """
-        _ = reason
         return await self._call_mc_ai_tool(event, "list", server=server)
 
     @filter.llm_tool(name="mc_get_tps")
     async def mc_get_tps(
-        self, event: AstrMessageEvent, reason: str, server: str = ""
+        self, event: AstrMessageEvent, server: str = ""
     ) -> str:
         """查询指定 Minecraft 服务器 TPS / MSPT 等性能数据。玩家问起卡不卡、TPS、延迟时必须调用，禁止编造。
 
         Args:
-            reason(string): 简要说明为何查询，例如「玩家问 TPS」
             server(string): 目标服务器名称、编号或别名；游戏内可留空；QQ 多开服必须填
         """
-        _ = reason
         return await self._call_mc_ai_tool(event, "tps", server=server)
 
     @filter.llm_tool(name="mc_server_info")
     async def mc_server_info(
-        self, event: AstrMessageEvent, reason: str, server: str = ""
+        self, event: AstrMessageEvent, server: str = ""
     ) -> str:
         """查询指定 Minecraft 服务器基本信息（名称、版本、在线人数、运行时长等）。不要编造。
 
         Args:
-            reason(string): 简要说明为何查询，例如「玩家问服务器信息」
             server(string): 目标服务器名称、编号或别名；游戏内可留空；QQ 多开服必须填
         """
-        _ = reason
         return await self._call_mc_ai_tool(event, "info", server=server)
 
     @filter.llm_tool(name="mc_run_command")
@@ -1732,7 +1723,7 @@ class EndstoneArcMessageCenter(Star):
         self,
         event: AstrMessageEvent,
         player_name: str,
-        duration: str = "",
+        minutes: str = "",
         reason: str = "",
         server: str = "",
     ) -> str:
@@ -1740,8 +1731,8 @@ class EndstoneArcMessageCenter(Star):
 
         Args:
             player_name(string): 要关押的游戏内玩家名
-            duration(string): 刑期分钟数，或 -1/life/无期；留空则用默认一键入狱时长
-            reason(string): 入狱原因，可留空
+            minutes(string): 刑期分钟数，或 -1/life/无期；留空则用默认一键入狱时长
+            reason(string): 入狱原因，写入监狱插件；可留空
             server(string): 目标服务器名称、编号或别名；游戏内可留空；QQ 多开服必须填
         """
         name = str(player_name or "").strip()
@@ -1752,7 +1743,7 @@ class EndstoneArcMessageCenter(Star):
             "jail",
             {
                 "player_name": name,
-                "duration": str(duration or "").strip(),
+                "minutes": str(minutes or "").strip(),
                 "reason": str(reason or "").strip(),
             },
             server=server,
@@ -1782,15 +1773,13 @@ class EndstoneArcMessageCenter(Star):
 
     @filter.llm_tool(name="mc_list_prisoners")
     async def mc_list_prisoners(
-        self, event: AstrMessageEvent, reason: str, server: str = ""
+        self, event: AstrMessageEvent, server: str = ""
     ) -> str:
         """查询指定 Minecraft 服务器当前在押玩家名单。问起谁在坐牢、监狱里有谁时必须调用，禁止编造。
 
         Args:
-            reason(string): 简要说明为何查询，例如「玩家问谁在坐牢」
             server(string): 目标服务器名称、编号或别名；游戏内可留空；QQ 多开服必须填
         """
-        _ = reason
         return await self._call_mc_ai_tool(event, "prisoners", server=server)
 
     @filter.llm_tool(name="mc_skyeye_player")
@@ -1806,7 +1795,7 @@ class EndstoneArcMessageCenter(Star):
 
         Args:
             player_name(string): 游戏内玩家名
-            minutes(string): 回溯时长，默认 30 分钟。查一天填 1440 或「一天」，查一小时填 60
+            minutes(string): 由你根据用户要求换算后的回溯分钟数。用户说一天则传 1440，一小时传 60，未说明可省略（默认 30）
             action(string): 可选，限定行为类型，如 BlockBreak / BlockPlace / ActorDamage / PlayerDeath
             server(string): 可留空以搜索全部已连接服务器；仅在明确只要某一台时才填写
         """
@@ -1837,7 +1826,7 @@ class EndstoneArcMessageCenter(Star):
 
         Args:
             player_name(string): 游戏内玩家名
-            minutes(string): 回溯时长，默认 30 分钟。查一天填 1440 或「一天」
+            minutes(string): 由你根据用户要求换算后的回溯分钟数。用户说一天则传 1440，一小时传 60，未说明可省略（默认 30）
             server(string): 可留空以搜索全部已连接服务器；仅在明确只要某一台时才填写
         """
         name = str(player_name or "").strip()
@@ -1871,7 +1860,7 @@ class EndstoneArcMessageCenter(Star):
             z(string): Z 坐标
             radius(string): 半径格数，默认 8
             dimension(string): 维度，如 minecraft:overworld；可留空表示不限
-            minutes(string): 回溯时长，默认 30 分钟。查一天填 1440 或「一天」
+            minutes(string): 由你根据用户要求换算后的回溯分钟数。用户说一天则传 1440，一小时传 60，未说明可省略（默认 30）
             server(string): 可留空以搜索全部已连接服务器；仅在明确只要某一台时才填写
         """
         return await self._call_mc_ai_tool(

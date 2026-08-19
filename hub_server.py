@@ -782,7 +782,7 @@ class ArcHubServer:
                 "jail",
                 {
                     "player_name": player_name,
-                    "duration": str(max(1, int(minutes))),
+                    "minutes": str(max(1, int(minutes))),
                     "reason": reason,
                     "is_op": True,
                 },

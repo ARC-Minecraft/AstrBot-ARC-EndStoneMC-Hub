@@ -71,23 +71,19 @@ AI Helper 使用独立连接：`register.role = "ai_helper"`，不会占用子�
 
 | 工具 | 权限 | 参数 | 必填 | 默认 | 含义 |
 |------|------|------|------|------|------|
-| `mc_list_servers` | 已激活即可 | `reason` | 是 | | 为何查询，例如「要确认打哪台服」 |
-| `mc_list_players` | 已激活即可 | `reason` | 是 | | 为何查询，例如「玩家问谁在线」 |
-| | | `server` | 多开服时要填 | 空 | 目标服名称 / 编号 / 别名 |
-| `mc_get_tps` | 已激活即可 | `reason` | 是 | | 为何查询，例如「玩家问 TPS」 |
-| | | `server` | 多开服时要填 | 空 | 目标服名称 / 编号 / 别名 |
-| `mc_server_info` | 已激活即可 | `reason` | 是 | | 为何查询，例如「玩家问服务器信息」 |
-| | | `server` | 多开服时要填 | 空 | 目标服名称 / 编号 / 别名 |
+| `mc_list_servers` | 已激活即可 | （无） | | | 列出已连接 Helper 服 |
+| `mc_list_players` | 已激活即可 | `server` | 多开服时要填 | 空 | 目标服名称 / 编号 / 别名 |
+| `mc_get_tps` | 已激活即可 | `server` | 多开服时要填 | 空 | 目标服名称 / 编号 / 别名 |
+| `mc_server_info` | 已激活即可 | `server` | 多开服时要填 | 空 | 目标服名称 / 编号 / 别名 |
 | `mc_run_command` | 管理员；或已绑定用户仅限本人自救 | `command` | 是 | | 不含 `/` 的游戏指令。例：`effect Steve night_vision 30 0 true`；劈闪电：`execute at Steve run summon lightning_bolt ~ ~ ~`。禁止 `stop` / `kill`；`gamemode` 仅 OP/管理员 |
 | | | `server` | 多开服时要填 | 空 | 目标服名称 / 编号 / 别名 |
 | `mc_jail_player` | 仅管理员 | `player_name` | 是 | | 要关押的游戏内玩家名 |
-| | | `duration` | 否 | 空 | 刑期分钟数，或 `-1` / `life` / `无期`；空则用服默认一键入狱时长 |
-| | | `reason` | 否 | 空 | 入狱原因 |
+| | | `minutes` | 否 | 空 | 刑期**分钟**数，或 `-1` / `life` / `无期`；空则用服默认一键入狱时长 |
+| | | `reason` | 否 | 空 | 入狱原因，写入监狱插件 |
 | | | `server` | 多开服时要填 | 空 | 目标服名称 / 编号 / 别名 |
 | `mc_release_player` | 仅管理员 | `player_name` | 是 | | 要释放的游戏内玩家名 |
 | | | `server` | 多开服时要填 | 空 | 目标服名称 / 编号 / 别名 |
-| `mc_list_prisoners` | 已激活即可 | `reason` | 是 | | 为何查询，例如「玩家问谁在坐牢」 |
-| | | `server` | 多开服时要填 | 空 | 目标服名称 / 编号 / 别名 |
+| `mc_list_prisoners` | 已激活即可 | `server` | 多开服时要填 | 空 | 目标服名称 / 编号 / 别名 |
 | `mc_skyeye_player` | 仅管理员 | `player_name` | 是 | | 游戏内玩家名；**不要求在线** |
 | | | `minutes` | 否 | `30` | 由模型按用户说法换算的回溯**分钟数**。一天=`1440`，一小时=`60` |
 | | | `action` | 否 | 空 | 限定行为类型，如 `BlockBreak` / `BlockPlace` / `ActorDamage` / `PlayerDeath` |
@@ -117,6 +113,7 @@ AI Helper 的 `ai_helper` 连接**不走**上述开停服播报。
 
 ## 更新日志
 
+- **1.6.14**：工具参数整理：查询类去掉无用的 `reason`；入狱时长改为 `minutes`（与天眼同一单位）；`reason` 仅保留为监狱入狱原因。
 - **1.6.13**：天眼查询不再要求指定服务器或玩家在线：`server` 留空（或指定服查不到）时会搜索全部已连接服务器。回溯时长由大模型按用户说法写入 `minutes`（一天=1440）。
 - **1.6.12**：Minecraft 消息中枢里的弧光天星回复也走弧光护卫：命中关键词则拦截原文，并对触发玩家施加与自己说违禁词相同的处罚（监狱 / 群禁言 / 击杀 / 警告）。身份仍是绑定 QQ，否则 XUID。
 - **1.6.11**：适配 QQ 官方机器人新的 `<@member_openid>` 提及格式。此前 `/mc addadmin @群名片` 会把 openid 开头的 `824346` 误当成 QQ 号。同时把运行时管理员列表写回插件配置。
