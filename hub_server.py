@@ -259,9 +259,9 @@ class ArcHubServer:
         self._running = False
         self._server = None
         self._serve_task: asyncio.Task | None = None
-        self.process_ai_chat: Callable[[dict[str, Any]], Awaitable[dict[str, Any]]] | None = (
-            None
-        )
+        self.process_ai_chat: (
+            Callable[[dict[str, Any]], Awaitable[dict[str, Any]]] | None
+        ) = None
         self.ai_chat_timeout = 180.0
         self._pending_ai_tool: dict[str, tuple[ServerConnection, asyncio.Future]] = {}
 
@@ -853,8 +853,6 @@ class ArcHubServer:
         hits = int(result.get("hits") or 1)
         mute_seconds = int(result.get("mute_seconds") or 60)
         reply = str(result.get("reply") or "").strip()
-        minutes = max(1, (mute_seconds + 59) // 60)
-
         logger.info(
             "[弧光EndStone消息中枢] 弧光护卫命中 chat server=%s player=%s qq=%s hits=%s",
             origin_server,
@@ -862,30 +860,68 @@ class ArcHubServer:
             bound_qq or "-",
             hits,
         )
+        await self.apply_forbidden_player_hit(
+            origin_server=origin_server,
+            player_name=player_name,
+            bound_qq=bound_qq,
+            hits=hits,
+            mute_seconds=mute_seconds,
+            reply=reply,
+            reason="MC聊天违规",
+        )
+        return True
 
-        jail_reason = "MC聊天违规"
+    async def apply_forbidden_player_hit(
+        self,
+        *,
+        origin_server: str,
+        player_name: str,
+        bound_qq: str,
+        hits: int,
+        mute_seconds: int,
+        reply: str,
+        reason: str,
+    ) -> str:
+        """Apply the same Arc Guard punishment used for MC chat keyword hits.
+
+        Jail when available, otherwise QQ mute; always kill + in-game warning
+        and QQ notice.
+
+        Args:
+            origin_server: Game server name to punish on.
+            player_name: Minecraft player name.
+            bound_qq: Bound QQ id, or empty if unbound.
+            hits: Forbidden-sequence hit count.
+            mute_seconds: Mute / jail duration in seconds.
+            reply: Warning text from Arc Guard.
+            reason: Jail reason string.
+
+        Returns:
+            In-game warning text.
+        """
+        minutes = max(1, (int(mute_seconds) + 59) // 60)
         jailed = False
         jail_result = ""
-        if player_name:
+        name = str(player_name or "").strip()
+        if name:
             jailed, jail_result = await self._punish_mc_chat_with_jail(
-                origin_server, player_name, minutes, jail_reason
+                origin_server, name, minutes, reason
             )
             if jailed:
                 logger.info(
                     "[弧光EndStone消息中枢] 弧光护卫改为监狱处罚 server=%s player=%s minutes=%s",
                     origin_server,
-                    player_name,
+                    name,
                     minutes,
                 )
             else:
                 logger.info(
                     "[弧光EndStone消息中枢] 本服未使用监狱处罚，回退群禁言 server=%s player=%s reason=%s",
                     origin_server,
-                    player_name,
+                    name,
                     jail_result or "-",
                 )
 
-        # Fall back to QQ mute only when jail is unavailable / failed.
         if (not jailed) and bound_qq and self.mute_qq:
             try:
                 ok = await self.mute_qq(bound_qq, mute_seconds)
@@ -900,13 +936,11 @@ class ArcHubServer:
                     f"[弧光EndStone消息中枢] 弧光护卫禁言失败 qq={bound_qq}: {e}"
                 )
 
-        # In-game kill + warning on the originating server (silent, no QQ cmd echo).
-        # Bedrock `/say` rejects `[` (selector/JSON), so use compact tellraw.
         if jailed:
             warn_game = reply or f"竟敢辱骂至高无上的ENMO，关进监狱{minutes}分钟！"
         else:
             warn_game = reply or f"竟敢辱骂至高无上的ENMO，枪毙{minutes}分钟！"
-        kill_name = player_name.replace('"', "").strip()
+        kill_name = name.replace('"', "").strip()
         if " " in kill_name:
             kill_arg = f'"{kill_name}"'
         else:
@@ -917,24 +951,27 @@ class ArcHubServer:
             ensure_ascii=False,
             separators=(",", ":"),
         )
-        await self._dispatch_silent_console_commands(
-            origin_server,
-            [
-                f"kill {kill_arg}",
-                f"tellraw @a {tellraw_json}",
-            ],
-        )
+        commands = [f"tellraw @a {tellraw_json}"]
+        if kill_arg:
+            commands.insert(0, f"kill {kill_arg}")
+        await self._dispatch_silent_console_commands(origin_server, commands)
 
-        # QQ notice (not the original insult).
-        notice = f"[{origin_server}]\n[弧光护卫] {player_name}: {warn_game}"
+        notice = f"[{origin_server}]\n[弧光护卫] {name}: {warn_game}"
         if jailed and jail_result:
             notice += f"\n[jail] {jail_result}"
         try:
             await self.broadcast_qq(notice)
         except Exception as e:
             logger.warning(f"[弧光EndStone消息中枢] 弧光护卫群警告发送失败: {e}")
-
-        return True
+        logger.info(
+            "[弧光EndStone消息中枢] 弧光护卫处罚完成 kind=%s server=%s player=%s qq=%s hits=%s",
+            reason,
+            origin_server,
+            name,
+            bound_qq or "-",
+            hits,
+        )
+        return warn_game
 
     async def _dispatch_silent_console_commands(
         self, server_name: str, commands: list[str]
@@ -1011,8 +1048,8 @@ class ArcHubServer:
                 "/mc help — 显示本帮助",
                 "/mc servers — 查看已连接子服编号",
                 "/mc admins — 查看管理员与超级管理员",
-                "/mc addadmin @QQ — 超级管理员添加管理员",
-                "/mc deladmin @QQ — 超级管理员移除管理员",
+                "/mc addadmin @对方 — 超级管理员添加管理员（也可回复对方消息）",
+                "/mc deladmin @对方 — 超级管理员移除管理员",
                 "/mc list [编号] — 在线玩家",
                 "/mc tps [编号] — TPS / MSPT",
                 "/mc info [编号] — 服务器信息",
@@ -1116,6 +1153,13 @@ class ArcHubServer:
             await self.reply_qq(reply_target, self.format_group_help_text())
             return
 
+        bind_head = forward_message.strip().split(None, 1)[0].lstrip("/")
+        if bind_head == "绑定":
+            await self._handle_qq_bind(
+                reply_target, user_id, forward_message.strip().split()[1:]
+            )
+            return
+
         eff_line, route_sid = parse_hub_command_routing(forward_message)
         if route_sid is not None:
             mc_ids = {
@@ -1139,6 +1183,10 @@ class ArcHubServer:
             )
             return
 
+        uid = str(user_id or "").strip()
+        is_admin = uid in self.hub_admins or (
+            bool(uid) and any(item.lower() == uid.lower() for item in self.hub_admins)
+        )
         await self.broadcast_to_all(
             {
                 "type": "command_forward",
@@ -1149,6 +1197,90 @@ class ArcHubServer:
                 "display_name": display_name,
                 "group_id": group_id,
                 "sender_role": sender_role,
-                "is_config_admin": str(user_id) in self.hub_admins,
+                "is_config_admin": is_admin,
             }
         )
+
+    async def _handle_qq_bind(
+        self,
+        reply_target: str,
+        user_id: str | int,
+        args: list[str],
+    ) -> None:
+        """Bind the sender QQ to a game character without forwarding to MC.
+
+        Group /绑定 used to be broadcast to every sub-server. Each server then
+        blocked the Hub WebSocket loop on synchronous data_rpc, ping timed out,
+        and all connections dropped.
+        """
+        prefix = f"[{self.hub_server_name}]"
+        if len(args) != 1 or not str(args[0]).strip():
+            await self.reply_qq(
+                reply_target,
+                f"{prefix}\n❌ 命令格式错误\n💡 正确用法：/mc 绑定 <游戏内玩家名>\n"
+                "💡 例如：/mc 绑定 DEVILENMO",
+            )
+            return
+
+        target_player_name = str(args[0]).strip()
+        qq_str = str(user_id).strip()
+        store = self.binding_store
+
+        if store.is_player_banned(target_player_name):
+            await self.reply_qq(
+                reply_target,
+                f"{prefix}\n❌ 玩家 {target_player_name} 已被封禁，无法绑定QQ",
+            )
+            return
+
+        existing_for_qq = store.get_qq_player(qq_str)
+        if existing_for_qq and existing_for_qq != target_player_name:
+            await self.reply_qq(
+                reply_target,
+                f"{prefix}\n❌ 您的QQ已绑定游戏角色「{existing_for_qq}」\n"
+                "💡 如需改绑请先联系管理员解绑，避免恶意占用多个角色",
+            )
+            return
+
+        if target_player_name not in store.binding_data:
+            await self.reply_qq(
+                reply_target,
+                f"{prefix}\n❌ 服务器记录中找不到名为「{target_player_name}」的玩家\n"
+                "💡 请先在游戏中至少登录一次，再于群内绑定",
+            )
+            return
+
+        if store.is_player_bound(target_player_name):
+            bound_qq = str(store.get_player_qq(target_player_name) or "")
+            if bound_qq == qq_str:
+                await self.reply_qq(
+                    reply_target,
+                    f"{prefix}\n✅ 您的QQ已与游戏角色「{target_player_name}」绑定，无需重复操作",
+                )
+            else:
+                await self.reply_qq(
+                    reply_target,
+                    f"{prefix}\n❌ 游戏角色「{target_player_name}」已绑定其他QQ\n"
+                    f"💡 该角色当前绑定QQ: {bound_qq}\n"
+                    "💡 若需更换绑定请联系管理员，请勿抢绑他人账号",
+                )
+            return
+
+        stored = store.binding_data.get(target_player_name) or {}
+        player_xuid = str(stored.get("xuid") or "").strip()
+        if not store.bind_player_qq(target_player_name, player_xuid, qq_str):
+            await self.reply_qq(
+                reply_target,
+                f"{prefix}\n❌ 绑定失败，请稍后重试或联系管理员",
+            )
+            return
+
+        await self.reply_qq(
+            reply_target,
+            f"{prefix}\n✅ 玩家 {target_player_name} 已成功绑定QQ！",
+        )
+        if self.sync_group_card and self.set_group_card:
+            try:
+                await self.set_group_card(int(qq_str), target_player_name)
+            except Exception as error:
+                logger.warning(f"[弧光EndStone消息中枢] 绑定后改群名片失败: {error}")

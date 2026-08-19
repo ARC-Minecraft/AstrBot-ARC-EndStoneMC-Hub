@@ -32,8 +32,8 @@ EndstoneMC-ARC-QQ-Sync-Plugin（各 MC 子服）
 - 群指令统一要求 `/mc` 前缀（如 `/mc help`、`/mc cmd stop`），剥前缀后再下发子服
 - QQ 绑定数据权威存储（`data.json` / data_rpc）
 - 可选同步群名片（`sync_group_card`）
-- **MC AI 对话 RPC**（`ai_chat`）：[AI Helper](https://github.com/ARC-Minecraft/EndstoneMC-ARC-AI-Helper) 将玩家消息送入 AstrBot 正式对话管线，人格 / 记忆由 AstrBot 维护。身份映射：已绑定则发送者 ID = **QQ 号**，未绑定则用 **XUID**；不传群号。服务角色 `ai_helper` 不占用子服编号、也不会播报开停服
-- **MC AI 服务器工具**（`ai_tool`）：给大模型提供 `mc_list_servers` / `mc_list_players` / `mc_get_tps` / `mc_server_info` / `mc_run_command` / `mc_jail_player` / `mc_release_player` / `mc_list_prisoners` / `mc_skyeye_player` / `mc_skyeye_combat` / `mc_skyeye_location`。游戏内打在消息来源服；外部对话需插件管理员先发 **`/mc activate`** 激活本会话（会话 ID 可为非数字字符串）。多开服通过 `server` 指定。能识别 QQ 群身份时，改世界类工具仅管理员。
+- **MC AI 对话 RPC**（`ai_chat`）：[AI Helper](https://github.com/ARC-Minecraft/EndstoneMC-ARC-AI-Helper) 将玩家消息送入 AstrBot 正式对话管线，人格 / 记忆由 AstrBot 维护。身份映射：已绑定则发送者 ID = **QQ 号**，未绑定则用 **XUID**；不传群号。弧光天星回复同样走弧光护卫关键词检测：命中则拦截原文，并对触发者施加与玩家自己说违禁词相同的处罚。服务角色 `ai_helper` 不占用子服编号、也不会播报开停服
+- **MC AI 服务器工具**（`ai_tool`）：给大模型提供 `mc_list_servers` / `mc_list_players` / `mc_get_tps` / `mc_server_info` / `mc_run_command` / `mc_jail_player` / `mc_release_player` / `mc_list_prisoners` / `mc_skyeye_player` / `mc_skyeye_combat` / `mc_skyeye_location`。游戏内打在消息来源服；外部对话需插件管理员先发 **`/mc activate`** 激活本会话（会话 ID 可为非数字字符串）。多开服通过 `server` 指定；**天眼查询 `server` 可留空，会搜索全部已连接服务器**（玩家不必在线）。能识别 QQ 群身份时，入狱 / 天眼 / 任意改世界指令仅管理员；**已绑定 QQ 用户**可在求助时对**本人绑定角色**使用 tp / effect / spawnpoint 等自救指令；**未绑定**用户无权执行改世界类工具。
 
 ## 安装
 
@@ -52,8 +52,8 @@ AstrBot/data/plugins/astrbot_plugin_endstone_arc/
 | `ws_port` | 与 MC `hub_port` / FRP 一致，默认 19136 |
 | `auth_token` | 与 MC `hub_token` 一致 |
 | `target_groups` | 同步的 QQ 群 |
-| `admins` | 初始管理员 ID；首次启动后会写入持久化 `admins.json` |
-| `super_admins` | 初始超级管理员 ID；可用 `/mc addadmin` / `/mc deladmin` 任免管理员 |
+| `admins` | 管理员 ID；首次启动写入 `admins.json`，之后 `/mc addadmin` 会同步回此项 |
+| `super_admins` | 超级管理员 ID；可用 `/mc addadmin` / `/mc deladmin` 任免管理员 |
 | `sync_group_card` | 绑定后是否改群名片 |
 | `forward_qq_chat` | 是否转发普通群聊到 MC |
 | `ai_chat_timeout` | MC AI 助手走 AstrBot 对话的超时秒数，默认 180 |
@@ -75,6 +75,11 @@ AI Helper 的 `ai_helper` 连接**不走**上述开停服播报。
 
 ## 更新日志
 
+- **1.6.13**：天眼查询不再要求指定服务器或玩家在线：`server` 留空（或指定服查不到）时会搜索全部已连接服务器；`minutes` 支持「一天」等时长（一天 = 1440 分钟）。
+- **1.6.12**：Minecraft 消息中枢里的弧光天星回复也走弧光护卫：命中关键词则拦截原文，并对触发玩家施加与自己说违禁词相同的处罚（监狱 / 群禁言 / 击杀 / 警告）。身份仍是绑定 QQ，否则 XUID。
+- **1.6.11**：适配 QQ 官方机器人新的 `<@member_openid>` 提及格式。此前 `/mc addadmin @群名片` 会把 openid 开头的 `824346` 误当成 QQ 号。同时把运行时管理员列表写回插件配置。
+- **1.6.10**：`/mc 绑定` 改为中枢本地处理，不再广播到所有子服。修复群内绑定时子服在 WebSocket 循环上同步等 data_rpc、心跳超时、全部断连的问题。需 QQ Sync ≥ 1.0.2。
+- **1.6.9**：QQ 群 AI 求助权限分层：已绑定用户可对本人角色使用 tp / effect / spawnpoint 等自救指令；未绑定用户无权调用 `mc_run_command`（需先 `/mc 绑定`）。需 AI Helper ≥ 1.2.6。
 - **1.6.8**：新增持久化管理员/超级管理员权限模型。`/mc addadmin @QQ`、`/mc deladmin @QQ`、`/mc admins` 由中枢本地处理；超级管理员可任免管理员，管理员与超级管理员其它权限一致。
 - **1.6.7**：MC 聊天/进服/开停服等广播改为发往所有 `/mc activate` 过的会话；`/mc help`、`/mc servers` 等中枢本地指令回复只回来源会话，不再固定往 `target_groups` 发。
 - **1.6.6**：修 `/mc` 指令被 LLM 聊天抢先消费的问题：用高优先级自定义过滤器在唤醒阶段拦截，并兼容 wake_prefix 剥掉开头 `/` 后的 `mc activate` 形式。

@@ -41,6 +41,8 @@ _MC_AI_IDENTITY_HINT = (
     "mc_release_player / mc_list_prisoners，不要用 mc_run_command 去跑 /jail。"
     "查询玩家位置、近期行为、打了谁、被谁打、坐标附近发生过什么时，必须调用 "
     "mc_skyeye_player / mc_skyeye_combat / mc_skyeye_location，禁止编造。"
+    "天眼不要求玩家在线。不知道在哪台服时 server 必须留空，工具会搜索全部已连接服务器。"
+    "查一天把 minutes 设为 1440 或「一天」，不要用默认 30 分钟。"
     "优先调用 mc_run_command 执行其它指令；只有工具不可用时，才在可见回复里使用 "
     "[execution_command:实际游戏指令] 标记。"
     "effect 只能用于药水效果，例如 effect Steve slowness 20 0 true。"
@@ -52,10 +54,30 @@ _QQ_MC_TOOL_HINT = (
     "查询在线、TPS、服务器信息或执行游戏指令时必须调用对应工具，禁止编造。"
     "关押玩家用 mc_jail_player，释放用 mc_release_player，查看在押用 mc_list_prisoners。"
     "查玩家位置/近期行为用 mc_skyeye_player，查打架用 mc_skyeye_combat，查坐标附近用 mc_skyeye_location。"
-    "有多台 Minecraft 服务器时，先调用 mc_list_servers，再在其它工具里填写 server"
+    "天眼不要求玩家在线。不知道人在哪台服时，server 必须留空（会搜全部已连接服务器），不要猜服名。"
+    "查一天把 minutes 设为 1440 或「一天」。改世界/查在线等其它工具在多开服时仍须填写 server。"
+    "有多台 Minecraft 服务器时，除天眼外先调用 mc_list_servers，再填写 server"
     "（名称、编号或别名），不要猜测。"
     "在能识别出 QQ 群主/群管身份的群聊里，mc_run_command / 入狱 / 天眼仅管理员可真正执行。"
+    "已绑定游戏角色的 QQ 用户可在求助时使用 tp / effect / spawnpoint 等自救指令，且仅限本人绑定角色；"
+    "未绑定用户无权执行改世界类指令，需先 /mc 绑定 <玩家名>。"
     "effect 只能用于药水效果。劈闪电必须用 execute at 玩家名 run summon lightning_bolt ~ ~ ~。"
+)
+
+_SKYEYE_FANOUT_ACTIONS = frozenset(
+    {"skyeye_player", "skyeye_combat", "skyeye_location"}
+)
+_SKYEYE_EMPTY_MARKERS = (
+    "天眼里也没有记录",
+    "没有记录",
+    "无记录",
+    "暂无记录",
+    "没有找到",
+    "无匹配",
+    "本服未安装",
+    "版本过旧",
+    "玩家名为空",
+    "坐标无效",
 )
 
 
@@ -90,6 +112,7 @@ class EndstoneArcMessageCenter(Star):
         self._activation_store = ActivationStore(data_dir)
         self._admin_store = AdminStore(data_dir, seed_admins=self._config_admin_ids())
         self._admin_store.seed_super_admins(self._config_super_admin_ids())
+        self._sync_admins_to_config()
         self._hydrate_umos_from_config()
         self._start_task = asyncio.create_task(self._start_hub())
 
@@ -149,24 +172,94 @@ class EndstoneArcMessageCenter(Star):
         supers = self._config_super_admin_ids()
         return supers or self._config_admin_ids()
 
+    @staticmethod
+    def _sender_id(event: AstrMessageEvent) -> str:
+        """Return the platform sender id, including non-string user_id values.
+
+        Args:
+            event: AstrBot message event.
+
+        Returns:
+            Stripped sender id, or an empty string when unavailable.
+        """
+        uid = event.get_sender_id()
+        if uid is not None and str(uid).strip():
+            return str(uid).strip()
+        sender = getattr(getattr(event, "message_obj", None), "sender", None)
+        raw = getattr(sender, "user_id", None) if sender else None
+        if raw is None or not str(raw).strip():
+            return ""
+        return str(raw).strip()
+
+    @staticmethod
+    def _id_in_set(user_id: object, pool: set[str]) -> bool:
+        """Match a platform user id against a stored admin set.
+
+        Args:
+            user_id: Candidate sender / mention id.
+            pool: Stored admin ids.
+
+        Returns:
+            True when the id is in the set, ignoring surrounding space and hex case.
+        """
+        uid = str(user_id or "").strip()
+        if not uid:
+            return False
+        if uid in pool:
+            return True
+        lowered = uid.lower()
+        return any(item.lower() == lowered for item in pool)
+
     def _is_hub_admin(self, event: AstrMessageEvent) -> bool:
-        uid = str(event.get_sender_id() or "").strip()
-        return bool(uid and uid in self._admin_ids())
+        return self._id_in_set(self._sender_id(event), self._admin_ids())
 
     def _is_super_admin(self, event: AstrMessageEvent) -> bool:
-        uid = str(event.get_sender_id() or "").strip()
-        return bool(uid and uid in self._super_admin_ids())
+        return self._id_in_set(self._sender_id(event), self._super_admin_ids())
 
     def _refresh_hub_admins(self) -> None:
         if self._hub is not None:
             self._hub.hub_admins = set(self._admin_ids())
+
+    def _sync_admins_to_config(self) -> None:
+        """Write the live admin store back to plugin config for the WebUI.
+
+        Returns:
+            None.
+        """
+        store = self._admin_store
+        config = self.config
+        if store is None or not hasattr(config, "save_config"):
+            return
+        supers = store.list_super_admins()
+        super_set = set(supers)
+        admins = [item for item in store.list_admins() if item not in super_set]
+        current_admins = [
+            str(item).strip()
+            for item in (config.get("admins") or [])
+            if str(item).strip()
+        ]
+        current_supers = [
+            str(item).strip()
+            for item in (config.get("super_admins") or [])
+            if str(item).strip()
+        ]
+        if current_admins == admins and current_supers == supers:
+            return
+        config["admins"] = admins
+        config["super_admins"] = supers
+        try:
+            config.save_config()
+        except Exception as error:
+            logger.warning(f"[{_HUB_DISPLAY}] 同步管理员到插件配置失败: {error}")
 
     async def _reply_to_event(self, event: AstrMessageEvent, text: str) -> None:
         try:
             await event.send(MessageEventResult().message(text))
             return
         except Exception as error:
-            logger.debug(f"[{_HUB_DISPLAY}] event.send 失败，改用 context.send_message: {error}")
+            logger.debug(
+                f"[{_HUB_DISPLAY}] event.send 失败，改用 context.send_message: {error}"
+            )
         umo = str(event.unified_msg_origin or "").strip()
         if not umo:
             logger.warning(f"[{_HUB_DISPLAY}] 无法回复：缺少 unified_msg_origin")
@@ -225,7 +318,7 @@ class EndstoneArcMessageCenter(Star):
             session_key,
             session_id=session_id,
             label=label,
-            by_admin=str(event.get_sender_id() or ""),
+            by_admin=self._sender_id(event),
         )
         logger.info(
             f"[{_HUB_DISPLAY}] /mc activate session_key={session_key} "
@@ -240,11 +333,7 @@ class EndstoneArcMessageCenter(Star):
                 "此后本对话中的 AI 可调用 mc_list_players、mc_run_command 等工具。"
             )
         else:
-            text = (
-                f"[{hub_name}]\n"
-                "ℹ️ 本会话已处于激活状态。\n"
-                f"会话 ID: {label}"
-            )
+            text = f"[{hub_name}]\nℹ️ 本会话已处于激活状态。\n会话 ID: {label}"
         await self._reply_to_event(event, text)
 
     @staticmethod
@@ -256,30 +345,352 @@ class EndstoneArcMessageCenter(Star):
         head = parts[0].lstrip("/").lower()
         return head, parts[1:]
 
-    def _extract_mentioned_user_ids(self, event: AstrMessageEvent, raw_text: str) -> list[str]:
-        ids: list[str] = []
+    def _ignored_mention_ids(self, event: AstrMessageEvent) -> set[str]:
+        """Ids that must not be treated as addadmin/deladmin targets.
+
+        Args:
+            event: Current message event.
+
+        Returns:
+            Bot self id plus reserved mention tokens.
+        """
+        ignored = {"all", "everyone", "qq_official", "unknown_selfid"}
+        self_id = str(event.get_self_id() or "").strip()
+        if self_id:
+            ignored.add(self_id)
+            ignored.add(self_id.lower())
+        return ignored
+
+    def _extract_mentioned_targets(
+        self, event: AstrMessageEvent, raw_text: str
+    ) -> list[tuple[str, str]]:
+        """Extract @ / reply targets as ``(raw_id, hint_name)``.
+
+        NapCat ``at.qq`` may be a tiny id, not the sender QQ used by permission
+        checks. The hint name (group card) is kept so we can resolve the real id.
+
+        Args:
+            event: AstrBot message event.
+            raw_text: Original message text, used for CQ codes.
+
+        Returns:
+            Unique targets, @mentions first, then replied-to sender.
+        """
+        targets: list[tuple[str, str]] = []
+        ignored = self._ignored_mention_ids(event)
+        reply_targets: list[tuple[str, str]] = []
+
+        def _add(
+            value: object,
+            hint: object = "",
+            bucket: list[tuple[str, str]] | None = None,
+        ) -> None:
+            text = str(value or "").strip()
+            if not text or text in ignored or text.lower() in ignored:
+                return
+            label = str(hint or "").strip()
+            dest = targets if bucket is None else bucket
+            for index, (existing, old_hint) in enumerate(dest):
+                if existing != text:
+                    continue
+                if label and len(label) > len(old_hint):
+                    dest[index] = (text, label)
+                return
+            dest.append((text, label))
+
+        try:
+            raw_obj = getattr(getattr(event, "message_obj", None), "raw_message", None)
+            raw_data = (
+                getattr(raw_obj, "raw_data", None) if raw_obj is not None else None
+            )
+            if isinstance(raw_obj, dict):
+                segs = raw_obj.get("message")
+                if isinstance(segs, list):
+                    for seg in segs:
+                        if (
+                            not isinstance(seg, dict)
+                            or str(seg.get("type") or "") != "at"
+                        ):
+                            continue
+                        data = (
+                            seg.get("data") if isinstance(seg.get("data"), dict) else {}
+                        )
+                        _add(
+                            data.get("uin") or data.get("user_id") or data.get("qq"),
+                            data.get("name") or data.get("display") or "",
+                        )
+                mentions = raw_obj.get("mentions")
+                if raw_data is None:
+                    raw_data = raw_obj
+            else:
+                mentions = (
+                    getattr(raw_obj, "mentions", None) if raw_obj is not None else None
+                )
+            mention_lists = [mentions]
+            if isinstance(raw_data, dict):
+                mention_lists.append(raw_data.get("mentions"))
+            for mention_list in mention_lists:
+                for mention in mention_list or []:
+                    if isinstance(mention, dict):
+                        if mention.get("is_you") or mention.get("bot"):
+                            continue
+                        _add(
+                            mention.get("member_openid")
+                            or mention.get("user_openid")
+                            or mention.get("uin")
+                            or mention.get("id"),
+                            mention.get("username") or mention.get("name") or "",
+                        )
+                        continue
+                    if (
+                        getattr(mention, "is_you", False) is True
+                        or getattr(mention, "bot", False) is True
+                    ):
+                        continue
+                    _add(
+                        getattr(mention, "member_openid", None)
+                        or getattr(mention, "user_openid", None)
+                        or getattr(mention, "id", None),
+                        getattr(mention, "username", None)
+                        or getattr(mention, "name", None)
+                        or "",
+                    )
+        except Exception:
+            pass
         try:
             for comp in event.get_messages():
                 type_name = type(comp).__name__.lower()
+                if type_name == "reply":
+                    _add(
+                        getattr(comp, "sender_id", None) or getattr(comp, "qq", None),
+                        getattr(comp, "sender_nickname", None) or "",
+                        reply_targets,
+                    )
+                    continue
                 if "at" not in type_name:
                     continue
-                qq = getattr(comp, "qq", None) or getattr(comp, "target", None)
-                if qq:
-                    text = str(qq).strip()
-                    if text and text not in ids:
-                        ids.append(text)
+                _add(
+                    getattr(comp, "qq", None) or getattr(comp, "target", None),
+                    getattr(comp, "name", None) or "",
+                )
         except Exception:
             pass
-        for text in re.findall(r"\[CQ:at,[^\]]*qq=(\d+)[^\]]*\]", raw_text or ""):
-            if text not in ids:
-                ids.append(text)
-        if not ids:
-            for text in re.findall(r"@(\d{5,})", raw_text or ""):
-                if text not in ids:
-                    ids.append(text)
-        return ids
+        for match in re.finditer(r"\[CQ:at,([^\]]*)\]", raw_text or ""):
+            params = match.group(1)
+            qq_match = re.search(r"(?:uin|user_id|qq)=([^,\]]+)", params)
+            name_match = re.search(r"name=([^,\]]+)", params)
+            if qq_match:
+                _add(qq_match.group(1), name_match.group(1) if name_match else "")
+        for source in (
+            raw_text,
+            getattr(event, "message_str", "") or "",
+        ):
+            for match in re.finditer(r"<@!?([A-Za-z0-9_-]+)>", str(source or "")):
+                _add(match.group(1))
+        if not targets:
+            for item in reply_targets:
+                _add(item[0], item[1])
+        return targets
 
-    async def _handle_mc_admin_command(self, event: AstrMessageEvent, mc_raw: str) -> bool:
+    def _nickname_from_at_hint(self, hint: str, raw_id: str) -> str:
+        """Return a usable group card from an At label.
+
+        Args:
+            hint: At.name or CQ name, e.g. ``QQ用户123(快跑你Buldapider来了)``.
+            raw_id: Mention id reported by the adapter.
+
+        Returns:
+            Bare group card / nickname, or empty string.
+        """
+        text = str(hint or "").strip()
+        if not text:
+            return ""
+        match = re.search(
+            rf"QQ用户{re.escape(str(raw_id))}\s*[（(](.+?)[）)]\s*$",
+            text,
+        )
+        if match:
+            return match.group(1).strip()
+        match = re.search(r"QQ用户\S*\s*[（(](.+?)[）)]\s*$", text)
+        if match:
+            return match.group(1).strip()
+        if text.startswith("QQ用户") or text in {"all", "全体成员"}:
+            return ""
+        return text
+
+    async def _resolve_admin_target(
+        self, event: AstrMessageEvent, raw_id: str, hint: str
+    ) -> str:
+        """Map an @ mention to the id used by ``get_sender_id()``.
+
+        Args:
+            event: Current group event.
+            raw_id: Id taken from At/CQ (may be NapCat tiny id).
+            hint: Display name / group card from the mention.
+
+        Returns:
+            Resolved platform user id. Falls back to ``raw_id`` when lookup fails.
+        """
+        uid = str(raw_id or "").strip()
+        nick = self._nickname_from_at_hint(hint, uid)
+        bot = getattr(event, "bot", None)
+        gid = str(event.get_group_id() or "").strip()
+        if bot is None or not gid or not gid.isdigit():
+            return uid
+
+        routing = {}
+        self_id = getattr(getattr(event, "message_obj", None), "self_id", None)
+        if self_id:
+            routing["self_id"] = self_id
+
+        real_from_info = ""
+        if uid.isdigit():
+            try:
+                info = await bot.call_action(
+                    "get_group_member_info",
+                    group_id=int(gid),
+                    user_id=int(uid),
+                    no_cache=True,
+                    **routing,
+                )
+            except Exception as error:
+                logger.debug(
+                    f"[{_HUB_DISPLAY}] get_group_member_info({uid}) 失败: {error}"
+                )
+                info = None
+            if isinstance(info, dict):
+                real_from_info = str(
+                    info.get("user_id") or info.get("uin") or ""
+                ).strip()
+                if not nick:
+                    nick = str(info.get("card") or info.get("nickname") or "").strip()
+
+        real_from_name = ""
+        if nick:
+            try:
+                members = await bot.call_action(
+                    "get_group_member_list",
+                    group_id=int(gid),
+                    **routing,
+                )
+            except Exception as error:
+                logger.debug(f"[{_HUB_DISPLAY}] get_group_member_list 失败: {error}")
+                members = None
+            if isinstance(members, list):
+                matches: list[str] = []
+                for member in members:
+                    if not isinstance(member, dict):
+                        continue
+                    names = {
+                        str(member.get("card") or "").strip(),
+                        str(member.get("nickname") or "").strip(),
+                    }
+                    if nick not in names:
+                        continue
+                    member_id = str(
+                        member.get("user_id") or member.get("uin") or ""
+                    ).strip()
+                    if member_id and member_id not in matches:
+                        matches.append(member_id)
+                if len(matches) == 1:
+                    real_from_name = matches[0]
+                elif len(matches) > 1:
+                    logger.warning(
+                        f"[{_HUB_DISPLAY}] 群名片 {nick} 匹配到多个成员: {matches}"
+                    )
+
+        resolved = real_from_name or real_from_info or uid
+        if resolved != uid:
+            logger.info(
+                f"[{_HUB_DISPLAY}] 解析 @ 目标 {uid} ({nick or hint}) -> {resolved}"
+            )
+        return resolved
+
+    def _log_admin_mention_dump(
+        self, event: AstrMessageEvent, mc_raw: str, raw_text: str
+    ) -> None:
+        """Log raw @mention payload so addadmin ID mismatches can be diagnosed.
+
+        Args:
+            event: Current command event.
+            mc_raw: Normalized ``/mc ...`` command text.
+            raw_text: Text from ``extract_event_raw_text``.
+        """
+        lines: list[str] = [
+            f"cmd={mc_raw!r}",
+            f"platform_name={event.get_platform_name()!r} platform_id={event.get_platform_id()!r}",
+            f"sender_id={self._sender_id(event)!r} self_id={event.get_self_id()!r} group_id={event.get_group_id()!r}",
+            f"message_str={getattr(event, 'message_str', '')!r}",
+            f"raw_text={raw_text!r}",
+            f"ignored={sorted(self._ignored_mention_ids(event))}",
+        ]
+        try:
+            comps: list[str] = []
+            for comp in event.get_messages():
+                comps.append(
+                    "type={type} qq={qq!r} target={target!r} name={name!r} "
+                    "sender_id={sender_id!r} text={text!r}".format(
+                        type=type(comp).__name__,
+                        qq=getattr(comp, "qq", None),
+                        target=getattr(comp, "target", None),
+                        name=getattr(comp, "name", None),
+                        sender_id=getattr(comp, "sender_id", None),
+                        text=getattr(comp, "text", None),
+                    )
+                )
+            lines.append("components=" + (" | ".join(comps) if comps else "(empty)"))
+        except Exception as error:
+            lines.append(f"components_error={error!r}")
+
+        raw_obj = getattr(getattr(event, "message_obj", None), "raw_message", None)
+        lines.append(f"raw_type={type(raw_obj).__name__}")
+        if isinstance(raw_obj, dict):
+            lines.append(f"raw_message_field={raw_obj.get('raw_message')!r}")
+            segs = raw_obj.get("message")
+            if isinstance(segs, list):
+                dumped: list[str] = []
+                for seg in segs:
+                    if not isinstance(seg, dict):
+                        dumped.append(repr(seg))
+                        continue
+                    dumped.append(f"type={seg.get('type')!r} data={seg.get('data')!r}")
+                lines.append(
+                    "raw_segments=" + (" | ".join(dumped) if dumped else "(empty)")
+                )
+            mentions = raw_obj.get("mentions")
+            if mentions:
+                lines.append(f"raw_mentions={mentions!r}")
+        elif raw_obj is not None:
+            try:
+                lines.append(f"raw_repr={raw_obj!r}"[:2000])
+            except Exception as error:
+                lines.append(f"raw_repr_error={error!r}")
+            mentions = getattr(raw_obj, "mentions", None)
+            if mentions:
+                dumped_mentions: list[str] = []
+                for mention in mentions:
+                    if isinstance(mention, dict):
+                        dumped_mentions.append(repr(mention))
+                        continue
+                    dumped_mentions.append(
+                        "id={id!r} member_openid={member_openid!r} user_openid={user_openid!r} "
+                        "username={username!r} is_you={is_you!r} bot={bot!r}".format(
+                            id=getattr(mention, "id", None),
+                            member_openid=getattr(mention, "member_openid", None),
+                            user_openid=getattr(mention, "user_openid", None),
+                            username=getattr(mention, "username", None)
+                            or getattr(mention, "name", None),
+                            is_you=getattr(mention, "is_you", None),
+                            bot=getattr(mention, "bot", None),
+                        )
+                    )
+                lines.append("raw_mentions=" + " | ".join(dumped_mentions))
+
+        logger.info("[%s] addadmin dump\n%s", _HUB_DISPLAY, "\n".join(lines))
+
+    async def _handle_mc_admin_command(
+        self, event: AstrMessageEvent, mc_raw: str
+    ) -> bool:
         head, args = self._parse_mc_local_command(mc_raw)
         if head not in {"addadmin", "deladmin", "admins"}:
             return False
@@ -288,7 +699,11 @@ class EndstoneArcMessageCenter(Star):
         if head == "admins":
             admins = sorted(self._admin_ids())
             supers = sorted(self._super_admin_ids())
-            lines = [f"[{hub_name}]", f"超级管理员: {len(supers)} 人", *[f"• {x}" for x in supers]]
+            lines = [
+                f"[{hub_name}]",
+                f"超级管理员: {len(supers)} 人",
+                *[f"• {x}" for x in supers],
+            ]
             lines.append(f"管理员: {len(admins)} 人")
             lines.extend(f"• {x}" for x in admins if x not in supers)
             await self._reply_to_event(event, "\n".join(lines))
@@ -307,24 +722,70 @@ class EndstoneArcMessageCenter(Star):
             return True
 
         raw_text = extract_event_raw_text(event)
-        targets = self._extract_mentioned_user_ids(event, raw_text)
-        if not targets and args:
+        self._log_admin_mention_dump(event, mc_raw, raw_text)
+        mentioned = self._extract_mentioned_targets(event, raw_text)
+        logger.info(
+            "[%s] addadmin parsed mentioned=%s args=%s",
+            _HUB_DISPLAY,
+            mentioned,
+            args,
+        )
+        raw_id = ""
+        hint = ""
+        if mentioned:
+            raw_id, hint = mentioned[0]
+        elif args:
             candidate = str(args[0]).strip().lstrip("@")
-            if candidate:
-                targets = [candidate]
-        if not targets:
-            usage = "/mc addadmin @QQ号" if head == "addadmin" else "/mc deladmin @QQ号"
-            await self._reply_to_event(event, f"[{hub_name}]\n❌ 请指定目标用户。\n用法：{usage}")
+            wrapped = re.fullmatch(r"<@!?([A-Za-z0-9_-]+)>", candidate)
+            if wrapped:
+                candidate = wrapped.group(1)
+            ignored = self._ignored_mention_ids(event)
+            if (
+                candidate
+                and candidate not in ignored
+                and candidate.lower() not in ignored
+            ):
+                raw_id, hint = candidate, candidate
+        if not raw_id:
+            usage = (
+                "/mc addadmin @对方 或回复对方消息后发送 /mc addadmin"
+                if head == "addadmin"
+                else "/mc deladmin @对方"
+            )
+            await self._reply_to_event(
+                event, f"[{hub_name}]\n❌ 请指定目标用户。\n用法：{usage}"
+            )
             return True
 
-        target = targets[0]
+        target = await self._resolve_admin_target(event, raw_id, hint)
+        nick = self._nickname_from_at_hint(hint, raw_id)
+        if not (
+            target.isdigit()
+            or (
+                len(target) >= 20
+                and all(ch in "0123456789abcdefABCDEF" for ch in target)
+            )
+        ):
+            await self._reply_to_event(
+                event,
+                f"[{hub_name}]\n❌ 无法把 @{nick or raw_id} 解析成对方的账号 ID。\n"
+                "请回复对方的一条消息后再发送 /mc addadmin。",
+            )
+            return True
+        label = f"{target}" + (f"（{nick}）" if nick and nick != target else "")
+        if target != raw_id and raw_id.isdigit():
+            label += f"\n已将 @ 段 ID {raw_id} 解析为对方发言时使用的账号 ID。"
+        logger.info(
+            f"[{_HUB_DISPLAY}] /mc {head} raw={raw_id} hint={hint!r} resolved={target}"
+        )
         if head == "addadmin":
             added = store.add_admin(target)
             self._refresh_hub_admins()
+            self._sync_admins_to_config()
             text = (
-                f"[{hub_name}]\n✅ 已添加管理员：{target}"
+                f"[{hub_name}]\n✅ 已添加管理员：{label}\n发送 /mc admins 可查看当前列表。"
                 if added
-                else f"[{hub_name}]\nℹ️ 该用户已是管理员：{target}"
+                else f"[{hub_name}]\nℹ️ 该用户已是管理员：{label}\n发送 /mc admins 可查看当前列表。"
             )
             await self._reply_to_event(event, text)
             return True
@@ -332,7 +793,10 @@ class EndstoneArcMessageCenter(Star):
         removed, reason = store.remove_admin(target)
         if removed:
             self._refresh_hub_admins()
-            await self._reply_to_event(event, f"[{hub_name}]\n✅ 已移除管理员：{target}")
+            self._sync_admins_to_config()
+            await self._reply_to_event(
+                event, f"[{hub_name}]\n✅ 已移除管理员：{target}"
+            )
         else:
             await self._reply_to_event(event, f"[{hub_name}]\n❌ 移除失败：{reason}")
         return True
@@ -512,7 +976,9 @@ class EndstoneArcMessageCenter(Star):
                     f"[{_HUB_DISPLAY}] 改群名片失败 group={gid} user={user_id}: {e}"
                 )
 
-    async def _send_message_to_umo(self, umo: str, text: str, *, label: str = "") -> None:
+    async def _send_message_to_umo(
+        self, umo: str, text: str, *, label: str = ""
+    ) -> None:
         umo = str(umo or "").strip()
         if not umo:
             return
@@ -611,7 +1077,7 @@ class EndstoneArcMessageCenter(Star):
 
     def _resolve_display_name(self, event: AstrMessageEvent) -> str:
         assert self._binding_store is not None
-        user_id = str(event.get_sender_id() or "")
+        user_id = self._sender_id(event)
         bound = self._binding_store.get_qq_player(user_id) if user_id else ""
         if bound:
             return bound
@@ -714,7 +1180,7 @@ class EndstoneArcMessageCenter(Star):
         gid = str(event.get_group_id() or event.get_session_id() or "").strip()
         await self._hub.push_command_forward(
             raw_message=mc_raw,
-            user_id=event.get_sender_id(),
+            user_id=self._sender_id(event),
             display_name=display_name,
             group_id=gid,
             session_key=str(event.unified_msg_origin or ""),
@@ -735,7 +1201,11 @@ class EndstoneArcMessageCenter(Star):
             return
 
         targets = self._target_group_ids()
-        if targets and str(gid) not in targets and not self._is_tool_session_activated(event):
+        if (
+            targets
+            and str(gid) not in targets
+            and not self._is_tool_session_activated(event)
+        ):
             return
 
         self._remember_umo(event)
@@ -802,7 +1272,9 @@ class EndstoneArcMessageCenter(Star):
         yield event.plain_result("\n".join(lines))
 
     @filter.on_llm_request()
-    async def on_llm_request(self, event: AstrMessageEvent, req: ProviderRequest) -> None:
+    async def on_llm_request(
+        self, event: AstrMessageEvent, req: ProviderRequest
+    ) -> None:
         """Append MC extra system instructions without replacing AstrBot persona."""
         if event.get_extra("mc_ai_event"):
             parts: list[str] = [_MC_AI_IDENTITY_HINT]
@@ -832,10 +1304,20 @@ class EndstoneArcMessageCenter(Star):
         try:
             raw_obj = event.message_obj.raw_message if event.message_obj else None
             if isinstance(raw_obj, dict):
-                return str((raw_obj.get("sender") or {}).get("role") or "member").lower()
+                return str(
+                    (raw_obj.get("sender") or {}).get("role") or "member"
+                ).lower()
         except Exception:
             pass
         return "member"
+
+    def _qq_bound_player_name(self, event: AstrMessageEvent) -> str:
+        """Return the bound in-game player name for a QQ sender, if any."""
+        assert self._binding_store is not None
+        user_id = self._sender_id(event)
+        if not user_id:
+            return ""
+        return str(self._binding_store.get_qq_player(user_id) or "").strip()
 
     def _qq_can_run_command(self, event: AstrMessageEvent) -> bool:
         """Whether this caller may run world-changing MC tools.
@@ -843,8 +1325,8 @@ class EndstoneArcMessageCenter(Star):
         Hub admins always can. In a QQ group with a known member role, only
         owner/admin can. Sessions without a group id rely on hub admin list.
         """
-        uid = str(event.get_sender_id() or "").strip()
-        if uid and uid in self._admin_ids():
+        uid = self._sender_id(event)
+        if self._id_in_set(uid, self._admin_ids()):
             return True
         gid = str(event.get_group_id() or "").strip()
         if not gid:
@@ -897,7 +1379,11 @@ class EndstoneArcMessageCenter(Star):
             if len(helpers) == 1:
                 return helpers[0], ""
             listing = self._format_ai_helper_listing() or "\n".join(helpers)
-            return "", "当前连了多台 Minecraft 服务器，请填写 server（名称、编号或别名）。已连接：\n" + listing
+            return (
+                "",
+                "当前连了多台 Minecraft 服务器，请填写 server（名称、编号或别名）。已连接：\n"
+                + listing,
+            )
 
         aliases = self._server_aliases()
         mapped = aliases.get(hint.lower())
@@ -924,9 +1410,133 @@ class EndstoneArcMessageCenter(Star):
         if len(partial) == 1:
             return partial[0], ""
         if len(partial) > 1:
-            return "", "server 匹配到多台服，请改用更完整的名称或编号：\n" + "\n".join(partial)
+            return "", "server 匹配到多台服，请改用更完整的名称或编号：\n" + "\n".join(
+                partial
+            )
         listing = self._format_ai_helper_listing() or "\n".join(helpers)
         return "", f"找不到服务器 [{hint}]。已连接：\n{listing}"
+
+    @staticmethod
+    def _parse_duration_minutes(raw: str, default: int = 30) -> int:
+        """Parse minutes from numbers or Chinese duration phrases such as 一天."""
+        text = str(raw or "").strip().lower().replace(" ", "")
+        if not text:
+            return default
+        named = {
+            "一天": 1440,
+            "1天": 1440,
+            "24小时": 1440,
+            "24h": 1440,
+            "半天": 720,
+            "12小时": 720,
+            "12h": 720,
+            "一小时": 60,
+            "1小时": 60,
+            "1h": 60,
+            "一周": 10080,
+            "7天": 10080,
+        }
+        if text in named:
+            return max(1, min(named[text], 10080))
+        match = re.fullmatch(r"(\d+)(天|日)", text)
+        if match:
+            return max(1, min(int(match.group(1)) * 1440, 10080))
+        match = re.fullmatch(r"(\d+)(小时|时|h)", text)
+        if match:
+            return max(1, min(int(match.group(1)) * 60, 10080))
+        match = re.fullmatch(r"(\d+)(分钟|分|m|min)?", text)
+        if match:
+            return max(1, min(int(match.group(1)), 10080))
+        try:
+            return max(1, min(int(text), 10080))
+        except ValueError:
+            return default
+
+    @staticmethod
+    def _skyeye_result_looks_empty(text: str) -> bool:
+        blob = str(text or "").strip()
+        if not blob:
+            return True
+        if any(
+            token in blob
+            for token in (
+                "BlockBreak",
+                "BlockPlace",
+                "ActorDamage",
+                "PlayerDeath",
+                "当前在线",
+                "最近一次天眼",
+            )
+        ):
+            return False
+        return any(marker in blob for marker in _SKYEYE_EMPTY_MARKERS)
+
+    async def _call_one_mc_ai_tool(
+        self,
+        server_name: str,
+        action: str,
+        payload: dict,
+        *,
+        timeout: float = 20,
+    ) -> tuple[str, str]:
+        """Call one helper and return ``(text, error)``."""
+        assert self._hub is not None
+        try:
+            resp = await self._hub.call_ai_tool(
+                server_name, action, payload, timeout=timeout
+            )
+        except Exception as error:
+            logger.warning(
+                f"[{_HUB_DISPLAY}] MC 工具 {action} 在 [{server_name}] 失败: {error}"
+            )
+            return "", f"调用 Minecraft 工具失败: {error}"
+        if not isinstance(resp, dict):
+            return "", "Minecraft 工具返回格式异常"
+        if not resp.get("ok"):
+            return "", str(resp.get("error") or "Minecraft 工具执行失败")
+        return str(resp.get("text") or "").strip() or "（无返回）", ""
+
+    async def _call_mc_ai_tool_all_helpers(
+        self,
+        action: str,
+        payload: dict,
+        *,
+        timeout: float = 30,
+    ) -> str:
+        """Query every connected AI Helper and keep servers that have records."""
+        if not self._hub:
+            return "弧光消息中枢尚未启动。"
+        helpers = self._hub.list_ai_helper_game_names()
+        if not helpers:
+            return "当前没有 Minecraft AI Helper 在线。"
+        if len(helpers) == 1:
+            text, error = await self._call_one_mc_ai_tool(
+                helpers[0], action, payload, timeout=timeout
+            )
+            return error or text
+
+        async def _one(name: str) -> tuple[str, str, str]:
+            text, error = await self._call_one_mc_ai_tool(
+                name, action, payload, timeout=timeout
+            )
+            return name, text, error
+
+        rows = await asyncio.gather(*[_one(name) for name in helpers])
+        hits: list[str] = []
+        misses: list[str] = []
+        for name, text, error in rows:
+            if error:
+                misses.append(f"[{name}] {error}")
+                continue
+            if self._skyeye_result_looks_empty(text):
+                first = text.splitlines()[0] if text else "无记录"
+                misses.append(f"[{name}] {first}")
+                continue
+            hits.append(f"[{name}]\n{text}")
+        if hits:
+            return "\n\n".join(hits)
+        detail = "\n".join(misses) if misses else "（无返回）"
+        return "所有已连接服务器均未查到有效天眼记录。\n" + detail
 
     async def _call_mc_ai_tool(
         self,
@@ -936,6 +1546,7 @@ class EndstoneArcMessageCenter(Star):
         *,
         server: str = "",
         require_admin: bool = False,
+        require_bound_or_admin: bool = False,
     ) -> str:
         """Run a Minecraft AI Helper tool for MC chat or any AstrBot session.
 
@@ -946,6 +1557,8 @@ class EndstoneArcMessageCenter(Star):
             server: External-side server hint; ignored for in-game origin server.
             require_admin: If True, identifiable QQ group callers must be hub
                 admin / group owner / admin. Sessions without a group id are allowed.
+            require_bound_or_admin: If True, QQ callers must be hub/group admin
+                or have a bound game character for limited self-help commands.
         """
         is_mc = bool(event.get_extra("mc_ai_event"))
         if not self._hub:
@@ -955,34 +1568,79 @@ class EndstoneArcMessageCenter(Star):
                 "该会话尚未激活 Minecraft 工具。"
                 "请让插件管理员在本对话发送 /mc activate。"
             )
-        if require_admin and not is_mc and not self._qq_can_run_command(event):
+        if require_bound_or_admin and not is_mc:
+            bound_name = self._qq_bound_player_name(event)
+            if self._qq_can_run_command(event):
+                pass
+            elif bound_name:
+                pass
+            else:
+                return (
+                    "没有权限：请先使用 /mc 绑定 <玩家名> 绑定游戏角色后再求助执行指令。"
+                    "（未绑定用户不能调用改世界类工具，与普通人尝试使用管理指令相同。）"
+                )
+        elif require_admin and not is_mc and not self._qq_can_run_command(event):
             return "没有权限：执行游戏指令仅限插件管理员、群主和群管理员。"
+
+        payload = dict(args or {})
+        if "minutes" in payload:
+            payload["minutes"] = str(
+                self._parse_duration_minutes(str(payload.get("minutes") or ""))
+            )
+        if is_mc:
+            payload.setdefault("is_op", bool(event.get_extra("mc_ai_is_op")))
+            payload.setdefault(
+                "player_name", str(event.get_extra("mc_ai_player_name") or "")
+            )
+            payload.setdefault("player_xuid", str(event.get_extra("mc_ai_xuid") or ""))
+        else:
+            bound_name = self._qq_bound_player_name(event)
+            is_admin = self._qq_can_run_command(event)
+            if require_bound_or_admin:
+                payload.setdefault("is_op", is_admin)
+                payload.setdefault(
+                    "is_bound_self_help", bool(bound_name) and not is_admin
+                )
+                if bound_name:
+                    payload.setdefault("bound_player_name", bound_name)
+            else:
+                payload.setdefault("is_op", is_admin)
+            payload.setdefault(
+                "player_name",
+                bound_name
+                or self._sender_id(event)
+                or str(event.get_sender_name() or ""),
+            )
+            payload.setdefault("player_xuid", "")
+
+        timeout = 30.0 if action in _SKYEYE_FANOUT_ACTIONS else 20.0
+        if action in _SKYEYE_FANOUT_ACTIONS and not str(server or "").strip():
+            return await self._call_mc_ai_tool_all_helpers(
+                action, payload, timeout=timeout
+            )
 
         server_name, error = self._resolve_tool_server(event, server)
         if error:
+            if action in _SKYEYE_FANOUT_ACTIONS:
+                return await self._call_mc_ai_tool_all_helpers(
+                    action, payload, timeout=timeout
+                )
             return error
-        payload = dict(args or {})
-        if is_mc:
-            payload.setdefault("is_op", bool(event.get_extra("mc_ai_is_op")))
-            payload.setdefault("player_name", str(event.get_extra("mc_ai_player_name") or ""))
-            payload.setdefault("player_xuid", str(event.get_extra("mc_ai_xuid") or ""))
-        else:
-            payload.setdefault("is_op", self._qq_can_run_command(event))
-            payload.setdefault(
-                "player_name",
-                str(event.get_sender_name() or event.get_sender_id() or ""),
+        text, call_error = await self._call_one_mc_ai_tool(
+            server_name, action, payload, timeout=timeout
+        )
+        if action in _SKYEYE_FANOUT_ACTIONS and (
+            call_error or self._skyeye_result_looks_empty(text)
+        ):
+            fallback = await self._call_mc_ai_tool_all_helpers(
+                action, payload, timeout=timeout
             )
-            payload.setdefault("player_xuid", "")
-        try:
-            resp = await self._hub.call_ai_tool(server_name, action, payload, timeout=20)
-        except Exception as e:
-            logger.warning(f"[{_HUB_DISPLAY}] MC 工具 {action} 失败: {e}")
-            return f"调用 Minecraft 工具失败: {e}"
-        if not isinstance(resp, dict):
-            return "Minecraft 工具返回格式异常"
-        if not resp.get("ok"):
-            return str(resp.get("error") or "Minecraft 工具执行失败")
-        text = str(resp.get("text") or "").strip() or "（无返回）"
+            if fallback and not self._skyeye_result_looks_empty(fallback):
+                return fallback
+            if fallback:
+                return fallback
+        if call_error:
+            return call_error
         if not is_mc and len(self._hub.list_ai_helper_game_names()) > 1:
             return f"[{server_name}]\n{text}"
         return text
@@ -997,7 +1655,9 @@ class EndstoneArcMessageCenter(Star):
         _ = reason
         if not self._hub:
             return "弧光消息中枢尚未启动。"
-        if not event.get_extra("mc_ai_event") and not self._is_tool_session_activated(event):
+        if not event.get_extra("mc_ai_event") and not self._is_tool_session_activated(
+            event
+        ):
             return (
                 "该会话尚未激活 Minecraft 工具。"
                 "请让插件管理员在本对话发送 /mc activate。"
@@ -1050,7 +1710,7 @@ class EndstoneArcMessageCenter(Star):
     async def mc_run_command(
         self, event: AstrMessageEvent, command: str, server: str = ""
     ) -> str:
-        """在指定 Minecraft 服务器控制台执行一条游戏指令。禁止 stop、kill；gamemode 仅 OP/管理员明确要求时可用。需要真实改游戏世界或给效果时调用。劈闪电用 execute at 玩家名 run summon lightning_bolt ~ ~ ~，不要写成 effect 玩家名 summon。
+        """在指定 Minecraft 服务器控制台执行一条游戏指令。禁止 stop、kill；gamemode 仅 OP/管理员明确要求时可用。需要真实改游戏世界或给效果时调用。QQ 群已绑定用户可在求助时对本人角色使用 tp / effect / spawnpoint 等自救指令；未绑定用户无权执行。劈闪电用 execute at 玩家名 run summon lightning_bolt ~ ~ ~，不要写成 effect 玩家名 summon。
 
         Args:
             command(string): 不含斜杠的游戏指令。给效果如 effect Steve night_vision 30 0 true；劈闪电如 execute at Steve run summon lightning_bolt ~ ~ ~
@@ -1064,7 +1724,7 @@ class EndstoneArcMessageCenter(Star):
             "cmd",
             {"command": command_line},
             server=server,
-            require_admin=True,
+            require_bound_or_admin=True,
         )
 
     @filter.llm_tool(name="mc_jail_player")
@@ -1142,13 +1802,13 @@ class EndstoneArcMessageCenter(Star):
         action: str = "",
         server: str = "",
     ) -> str:
-        """查询天眼：指定玩家现在在哪、是否在领地内，以及近几分钟做过什么（破坏/放置/交互/进出服等）。问起某人在哪、刚干了什么时必须调用，禁止编造。仅管理员。
+        """查询天眼：指定玩家现在在哪、是否在领地内，以及近期做过什么（破坏/放置/交互/进出服等）。不要求该玩家在线。问起某人在哪、刚干了什么、一天内干了什么时必须调用，禁止编造。仅管理员。
 
         Args:
             player_name(string): 游戏内玩家名
-            minutes(string): 回溯分钟数，默认 30
+            minutes(string): 回溯时长，默认 30 分钟。查一天填 1440 或「一天」，查一小时填 60
             action(string): 可选，限定行为类型，如 BlockBreak / BlockPlace / ActorDamage / PlayerDeath
-            server(string): 目标服务器名称、编号或别名；游戏内可留空；QQ 多开服必须填
+            server(string): 可留空以搜索全部已连接服务器；仅在明确只要某一台时才填写
         """
         name = str(player_name or "").strip()
         if not name:
@@ -1173,12 +1833,12 @@ class EndstoneArcMessageCenter(Star):
         minutes: str = "30",
         server: str = "",
     ) -> str:
-        """查询天眼战斗记录：该玩家打了谁、被谁打了、死亡。问起打架、被打、击杀时必须调用，禁止编造。仅管理员。
+        """查询天眼战斗记录：该玩家打了谁、被谁打了、死亡。不要求该玩家在线。问起打架、被打、击杀时必须调用，禁止编造。仅管理员。
 
         Args:
             player_name(string): 游戏内玩家名
-            minutes(string): 回溯分钟数，默认 30
-            server(string): 目标服务器名称、编号或别名；游戏内可留空；QQ 多开服必须填
+            minutes(string): 回溯时长，默认 30 分钟。查一天填 1440 或「一天」
+            server(string): 可留空以搜索全部已连接服务器；仅在明确只要某一台时才填写
         """
         name = str(player_name or "").strip()
         if not name:
@@ -1211,8 +1871,8 @@ class EndstoneArcMessageCenter(Star):
             z(string): Z 坐标
             radius(string): 半径格数，默认 8
             dimension(string): 维度，如 minecraft:overworld；可留空表示不限
-            minutes(string): 回溯分钟数，默认 30
-            server(string): 目标服务器名称、编号或别名；游戏内可留空；QQ 多开服必须填
+            minutes(string): 回溯时长，默认 30 分钟。查一天填 1440 或「一天」
+            server(string): 可留空以搜索全部已连接服务器；仅在明确只要某一台时才填写
         """
         return await self._call_mc_ai_tool(
             event,
@@ -1279,6 +1939,74 @@ class EndstoneArcMessageCenter(Star):
             return {"ok": False, "error": str(e)}
 
         reply_text = str(reply or "").strip()
+        reply_text = await self._filter_mc_ai_reply(event, reply_text)
         if not reply_text:
             return {"ok": False, "error": "AstrBot 未返回文本"}
         return {"ok": True, "reply": reply_text}
+
+    async def _filter_mc_ai_reply(
+        self, event: McAiMessageEvent, reply_text: str
+    ) -> str:
+        """Intercept forbidden AI text and punish the triggering player.
+
+        Sender id is bound QQ, otherwise XUID. Punishment matches MC chat
+        keyword hits (jail / QQ mute / kill / warning). Whitelist players are
+        not punished, but the original AI text is still replaced.
+
+        Args:
+            event: Synthetic MC AI event for this turn.
+            reply_text: Assistant text collected from the AstrBot pipeline.
+
+        Returns:
+            Warning text when blocked, otherwise the original reply.
+        """
+        if not reply_text:
+            return reply_text
+        api = self._get_arc_guard_api()
+        blocked = bool(event.get_extra("arc_guard_ai_blocked"))
+        hits = int(event.get_extra("arc_guard_ai_hits") or 0)
+        mute_seconds = int(event.get_extra("arc_guard_ai_mute_seconds") or 0)
+        warning = str(event.get_extra("arc_guard_ai_reply") or "").strip()
+        if (not blocked) and api is not None:
+            try:
+                hits = int(api.count_forbidden(reply_text) or 0)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(f"[{_HUB_DISPLAY}] 弧光护卫检测 AI 回复失败: {exc}")
+                hits = 0
+            if hits > 0:
+                blocked = True
+                mute_seconds = int(api.mute_seconds_for_hits(hits))
+                warning = str(api.format_reply(hits) or "").strip()
+        if not blocked or hits <= 0:
+            return reply_text
+
+        warning = warning or reply_text
+        bound_qq = str(event.get_extra("mc_ai_qq") or "").strip()
+        skip_punish = False
+        if bound_qq and api is not None:
+            try:
+                skip_punish = bool(api.is_whitelisted(bound_qq))
+            except Exception:
+                skip_punish = False
+        if skip_punish:
+            logger.info(
+                "[%s] 拦截弧光天星违禁回复（白名单不处罚） server=%s player=%s qq=%s hits=%s",
+                _HUB_DISPLAY,
+                event.get_extra("mc_ai_server"),
+                event.get_extra("mc_ai_player_name"),
+                bound_qq,
+                hits,
+            )
+            return warning
+
+        if self._hub is not None:
+            await self._hub.apply_forbidden_player_hit(
+                origin_server=str(event.get_extra("mc_ai_server") or ""),
+                player_name=str(event.get_extra("mc_ai_player_name") or ""),
+                bound_qq=bound_qq,
+                hits=hits,
+                mute_seconds=mute_seconds,
+                reply=warning,
+                reason="MC AI回复违规",
+            )
+        return warning
