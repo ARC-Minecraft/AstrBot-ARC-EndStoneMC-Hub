@@ -63,6 +63,48 @@ MC 子服侧（[QQ Sync](https://github.com/ARC-Minecraft/EndstoneMC-ARC-QQ-Sync
 
 AI Helper 使用独立连接：`register.role = "ai_helper"`，不会占用子服编号，也不会播报开停服。欢迎包含 `ai_chat: true` 与 `features: ["ai_chat", "ai_tools"]`。需要先升级本中枢，再启用 AI Helper 的 AstrBot 对话。
 
+## MC AI 工具参数一览
+
+大模型通过 AstrBot `llm_tool` 调用；`event` 由框架注入，**不是**模型参数。外部对话须先 `/mc activate`。
+
+`server` 通则：游戏内可留空（打在消息来源服）。QQ / 其它入口多开服时，查询与改世界一般要填名称、编号或别名。**天眼三类工具例外**：`server` 可留空，会搜全部已连接服务器；指定服查空也会自动再搜其它服。
+
+| 工具 | 权限 | 参数 | 必填 | 默认 | 含义 |
+|------|------|------|------|------|------|
+| `mc_list_servers` | 已激活即可 | `reason` | 是 | | 为何查询，例如「要确认打哪台服」 |
+| `mc_list_players` | 已激活即可 | `reason` | 是 | | 为何查询，例如「玩家问谁在线」 |
+| | | `server` | 多开服时要填 | 空 | 目标服名称 / 编号 / 别名 |
+| `mc_get_tps` | 已激活即可 | `reason` | 是 | | 为何查询，例如「玩家问 TPS」 |
+| | | `server` | 多开服时要填 | 空 | 目标服名称 / 编号 / 别名 |
+| `mc_server_info` | 已激活即可 | `reason` | 是 | | 为何查询，例如「玩家问服务器信息」 |
+| | | `server` | 多开服时要填 | 空 | 目标服名称 / 编号 / 别名 |
+| `mc_run_command` | 管理员；或已绑定用户仅限本人自救 | `command` | 是 | | 不含 `/` 的游戏指令。例：`effect Steve night_vision 30 0 true`；劈闪电：`execute at Steve run summon lightning_bolt ~ ~ ~`。禁止 `stop` / `kill`；`gamemode` 仅 OP/管理员 |
+| | | `server` | 多开服时要填 | 空 | 目标服名称 / 编号 / 别名 |
+| `mc_jail_player` | 仅管理员 | `player_name` | 是 | | 要关押的游戏内玩家名 |
+| | | `duration` | 否 | 空 | 刑期分钟数，或 `-1` / `life` / `无期`；空则用服默认一键入狱时长 |
+| | | `reason` | 否 | 空 | 入狱原因 |
+| | | `server` | 多开服时要填 | 空 | 目标服名称 / 编号 / 别名 |
+| `mc_release_player` | 仅管理员 | `player_name` | 是 | | 要释放的游戏内玩家名 |
+| | | `server` | 多开服时要填 | 空 | 目标服名称 / 编号 / 别名 |
+| `mc_list_prisoners` | 已激活即可 | `reason` | 是 | | 为何查询，例如「玩家问谁在坐牢」 |
+| | | `server` | 多开服时要填 | 空 | 目标服名称 / 编号 / 别名 |
+| `mc_skyeye_player` | 仅管理员 | `player_name` | 是 | | 游戏内玩家名；**不要求在线** |
+| | | `minutes` | 否 | `30` | 由模型按用户说法换算的回溯**分钟数**。一天=`1440`，一小时=`60` |
+| | | `action` | 否 | 空 | 限定行为类型，如 `BlockBreak` / `BlockPlace` / `ActorDamage` / `PlayerDeath` |
+| | | `server` | 否 | 空 | **建议留空搜全服**；只查某一台时才填 |
+| `mc_skyeye_combat` | 仅管理员 | `player_name` | 是 | | 游戏内玩家名；不要求在线 |
+| | | `minutes` | 否 | `30` | 同上，模型换算后的分钟数 |
+| | | `server` | 否 | 空 | **建议留空搜全服** |
+| `mc_skyeye_location` | 仅管理员 | `x` | 是 | | X 坐标 |
+| | | `y` | 是 | | Y 坐标 |
+| | | `z` | 是 | | Z 坐标 |
+| | | `radius` | 否 | `8` | 半径格数 |
+| | | `dimension` | 否 | 空 | 维度，如 `minecraft:overworld`；空表示不限 |
+| | | `minutes` | 否 | `30` | 模型换算后的回溯分钟数 |
+| | | `server` | 否 | 空 | **建议留空搜全服** |
+
+权限补充：QQ 群里「管理员」= 插件管理员 / 超级管理员，或能识别出的群主 / 群管。`mc_run_command` 对已绑定用户开放 tp / effect / spawnpoint 等自救，且只能打在本人绑定角色上；未绑定用户不能改世界。
+
 ## 启停与连接提示
 
 子服可能被直接杀进程，发不出 `server_stop`。因此 **QQ 与跨服提示都以中枢 WebSocket 连上/断开为准**：
@@ -75,7 +117,7 @@ AI Helper 的 `ai_helper` 连接**不走**上述开停服播报。
 
 ## 更新日志
 
-- **1.6.13**：天眼查询不再要求指定服务器或玩家在线：`server` 留空（或指定服查不到）时会搜索全部已连接服务器；`minutes` 支持「一天」等时长（一天 = 1440 分钟）。
+- **1.6.13**：天眼查询不再要求指定服务器或玩家在线：`server` 留空（或指定服查不到）时会搜索全部已连接服务器。回溯时长由大模型按用户说法写入 `minutes`（一天=1440）。
 - **1.6.12**：Minecraft 消息中枢里的弧光天星回复也走弧光护卫：命中关键词则拦截原文，并对触发玩家施加与自己说违禁词相同的处罚（监狱 / 群禁言 / 击杀 / 警告）。身份仍是绑定 QQ，否则 XUID。
 - **1.6.11**：适配 QQ 官方机器人新的 `<@member_openid>` 提及格式。此前 `/mc addadmin @群名片` 会把 openid 开头的 `824346` 误当成 QQ 号。同时把运行时管理员列表写回插件配置。
 - **1.6.10**：`/mc 绑定` 改为中枢本地处理，不再广播到所有子服。修复群内绑定时子服在 WebSocket 循环上同步等 data_rpc、心跳超时、全部断连的问题。需 QQ Sync ≥ 1.0.2。
