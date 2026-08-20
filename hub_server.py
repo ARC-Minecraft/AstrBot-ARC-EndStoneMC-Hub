@@ -642,32 +642,45 @@ class ArcHubServer:
         return resp
 
     async def _resolve_player_via_core(self, player_name: str) -> tuple[str, str]:
-        """Resolve a game name via arc_core player APIs on any connected helper.
+        """Ask any connected helper to resolve a name via arc_core player APIs.
 
-        Cross-server player records already live inside those APIs.
+        Cross-server sync is handled inside arc_core (``player_basic_info`` /
+        shared DB), not in the hub.
         """
         helpers = self.list_ai_helper_game_names()
+        if not helpers:
+            logger.warning("[弧光EndStone消息中枢] 解析玩家失败: 无 AI Helper 在线")
+            return "", ""
+        actions = ("player_basic_info", "resolve_player", "lookup_player")
         last_error = ""
         for game in helpers:
-            try:
-                resp = await self.call_ai_tool(
-                    game,
-                    "resolve_player",
-                    {"player_name": player_name},
-                    timeout=12,
-                )
-            except Exception as error:
-                last_error = str(error)
-                continue
-            if isinstance(resp, dict) and resp.get("ok"):
-                name = str(resp.get("player_name") or player_name).strip()
-                xuid = str(resp.get("xuid") or "").strip()
-                if name and xuid:
-                    return name, xuid
-            if isinstance(resp, dict):
-                last_error = str(resp.get("error") or last_error)
+            for action in actions:
+                try:
+                    resp = await self.call_ai_tool(
+                        game,
+                        action,
+                        {"player_name": player_name},
+                        timeout=12,
+                    )
+                except Exception as error:
+                    last_error = str(error)
+                    continue
+                if isinstance(resp, dict) and resp.get("ok"):
+                    name = str(resp.get("player_name") or player_name).strip()
+                    xuid = str(resp.get("xuid") or "").strip()
+                    if name and xuid:
+                        return name, xuid
+                if isinstance(resp, dict):
+                    err = str(resp.get("error") or "").strip()
+                    if err and "未知工具动作" not in err:
+                        last_error = err
+                    elif err:
+                        last_error = (
+                            f"{err}（请升级 AI Helper ≥ 2.1.5 并重启 Endstone）"
+                        )
         logger.warning(
-            f"[弧光EndStone消息中枢] 解析玩家 {player_name} 失败: {last_error or '无 AI Helper'}"
+            f"[弧光EndStone消息中枢] 解析玩家 {player_name} 失败: "
+            f"{last_error or '所有 Helper 均无记录'}"
         )
         return "", ""
 
