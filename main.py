@@ -46,6 +46,8 @@ _MC_AI_IDENTITY_HINT = (
     "禁止用 mc_run_command 代替这些弧光核心工具。"
     "要把玩家关进监狱、释放或查看在押名单时，必须调用 mc_jail_player / "
     "mc_release_player / mc_list_prisoners，不要用 mc_run_command 去跑 /jail。"
+    "管理员帮别人绑定或解绑 QQ 与游戏角色时，必须调用 mc_qq_binding"
+    "（sub_action=bind/unbind/query），不要编造绑定状态；force=true 可强制改绑。"
     "查询玩家位置、近期行为、打了谁、被谁打、坐标附近发生过什么时，必须调用 "
     "mc_skyeye_player / mc_skyeye_combat / mc_skyeye_location，禁止编造。"
     "天眼不要求玩家在线。不知道在哪台服时 server 必须留空，工具会搜索全部已连接服务器。"
@@ -76,6 +78,8 @@ _QQ_MC_TOOL_HINT = (
     "仅管理员可真正执行；mc_landmarks 只读例外；已绑定用户可查自己余额，并从自己账户发红包。"
     "已绑定游戏角色的 QQ 用户可在求助时使用 tp / effect / spawnpoint 等自救指令，且仅限本人绑定角色；"
     "未绑定用户无权执行改世界类指令，需先 /mc 绑定 <玩家名>。"
+    "管理员帮别人绑定/解绑 QQ 与游戏角色时，必须调用 mc_qq_binding"
+    "（sub_action=bind/unbind/query），不要让用户自己猜指令；force=true 可强制改绑。"
     "effect 只能用于药水效果。劈闪电必须用 execute at 玩家名 run summon lightning_bolt ~ ~ ~。"
 )
 
@@ -2093,6 +2097,212 @@ class EndstoneArcMessageCenter(Star):
             server=server,
             require_admin=True,
         )
+
+    def _can_manage_qq_binding(self, event: AstrMessageEvent) -> bool:
+        """Whether the caller may bind/unbind QQ for others (admin / OP only)."""
+        if event.get_extra("mc_ai_event"):
+            if bool(event.get_extra("mc_ai_is_op")):
+                return True
+            level = str(event.get_extra("mc_ai_permission_level") or "").strip().lower()
+            return level in {
+                "admin",
+                "管理员",
+                "proxy_owner",
+                "代理服主",
+                "owner",
+                "服主",
+            }
+        return self._qq_can_run_command(event)
+
+    def _admin_label_for_binding(self, event: AstrMessageEvent) -> str:
+        if event.get_extra("mc_ai_event"):
+            name = str(event.get_extra("mc_ai_player_name") or "").strip()
+            return f"mc:{name}" if name else "mc:op"
+        uid = self._sender_id(event)
+        return f"qq:{uid}" if uid else "admin"
+
+    def _query_qq_binding_text(self, player_name: str = "", qq: str = "") -> str:
+        assert self._binding_store is not None
+        store = self._binding_store
+        name = str(player_name or "").strip()
+        qq_str = str(qq or "").strip()
+        if name:
+            canonical, data = store.find_player_entry(name)
+            if not data:
+                return f"中枢绑定记录中没有玩家「{name}」（可用 bind 经弧光核心解析后写入）"
+            bound = str(data.get("qq") or "").strip()
+            xuid = str(data.get("xuid") or "").strip()
+            if bound:
+                return (
+                    f"玩家 {canonical} 已绑定 QQ {bound}"
+                    + (f"，XUID {xuid}" if xuid else "")
+                )
+            return (
+                f"玩家 {canonical} 存在记录但未绑定 QQ"
+                + (f"（XUID {xuid}）" if xuid else "")
+            )
+        if qq_str:
+            bound_name = store.get_qq_player(qq_str)
+            if bound_name:
+                return f"QQ {qq_str} 已绑定游戏角色「{bound_name}」"
+            hist = store.get_qq_player_history(qq_str)
+            if hist:
+                return (
+                    f"QQ {qq_str} 当前未绑定；历史关联角色："
+                    + "、".join(hist)
+                )
+            return f"QQ {qq_str} 无绑定记录"
+        return "请提供 player_name 或 qq"
+
+    async def _admin_bind_qq(
+        self,
+        *,
+        player_name: str,
+        qq: str,
+        force: bool,
+        admin_label: str,
+    ) -> str:
+        assert self._hub is not None and self._binding_store is not None
+        store = self._binding_store
+        name = str(player_name or "").strip()
+        qq_str = str(qq or "").strip()
+        if not name or not qq_str:
+            return "绑定需要同时提供 player_name（游戏名）与 qq（QQ号）"
+        if not qq_str.isdigit() or not (5 <= len(qq_str) <= 11):
+            return "QQ号无效：须为 5～11 位数字"
+
+        if store.is_player_banned(name):
+            return f"玩家 {name} 已被封禁，无法绑定"
+
+        existing_for_qq = store.get_qq_player(qq_str)
+        if existing_for_qq and existing_for_qq.lower() != name.lower():
+            if not force:
+                return (
+                    f"QQ {qq_str} 已绑定角色「{existing_for_qq}」。"
+                    "若要改绑请设 force=true，或先对该角色 unbind。"
+                )
+            store.unbind_player_qq(existing_for_qq, admin_name=admin_label)
+
+        canonical, stored = store.find_player_entry(name)
+        player_xuid = str((stored or {}).get("xuid") or "").strip()
+        if not player_xuid:
+            resolved_name, resolved_xuid = await self._hub._resolve_player_via_core(name)
+            if not resolved_xuid:
+                return (
+                    f"服务器记录中找不到名为「{name}」的玩家。"
+                    "请确认该玩家至少登录过一次游戏。"
+                )
+            canonical = store.ensure_player_record(resolved_name, resolved_xuid)
+            player_xuid = resolved_xuid
+        elif not canonical:
+            canonical = store.ensure_player_record(name, player_xuid)
+
+        target = canonical or name
+        bound_qq = str(store.get_player_qq(target) or "").strip()
+        if bound_qq:
+            if bound_qq == qq_str:
+                return f"QQ {qq_str} 已与「{target}」绑定，无需重复操作"
+            if not force:
+                return (
+                    f"角色「{target}」已绑定 QQ {bound_qq}。"
+                    "若要改绑请设 force=true，或先 unbind。"
+                )
+            store.unbind_player_qq(target, admin_name=admin_label)
+
+        if not store.bind_player_qq(target, player_xuid, qq_str):
+            return "绑定失败，请稍后重试"
+        if self._hub.sync_group_card and self._hub.set_group_card:
+            try:
+                await self._hub.set_group_card(int(qq_str), target)
+            except Exception as error:
+                logger.warning(f"[{_HUB_DISPLAY}] 绑定工具改群名片失败: {error}")
+        return f"已将 QQ {qq_str} 绑定到游戏角色「{target}」（操作者 {admin_label}）"
+
+    def _admin_unbind_qq(
+        self, *, player_name: str = "", qq: str = "", admin_label: str
+    ) -> str:
+        assert self._binding_store is not None
+        store = self._binding_store
+        name = str(player_name or "").strip()
+        qq_str = str(qq or "").strip()
+        if not name and not qq_str:
+            return "解绑需要提供 player_name 或 qq"
+        if not name and qq_str:
+            name = store.get_qq_player(qq_str)
+            if not name:
+                return f"QQ {qq_str} 当前没有绑定的游戏角色"
+        canonical, data = store.find_player_entry(name)
+        if not data:
+            return f"找不到玩家「{name}」的绑定记录"
+        bound = str(data.get("qq") or "").strip()
+        if not bound:
+            return f"玩家「{canonical}」当前未绑定 QQ"
+        if not store.unbind_player_qq(canonical, admin_name=admin_label):
+            return "解绑失败，请稍后重试"
+        return (
+            f"已解除「{canonical}」与 QQ {bound} 的绑定"
+            f"（操作者 {admin_label}）"
+        )
+
+    @filter.llm_tool(name="mc_qq_binding")
+    async def mc_qq_binding(
+        self,
+        event: AstrMessageEvent,
+        sub_action: str = "query",
+        player_name: str = "",
+        qq: str = "",
+        force: str = "",
+    ) -> str:
+        """管理 QQ 与游戏角色绑定。管理员可帮别人绑定/解绑/查询；普通人请自行 /mc 绑定。bind 需 player_name+qq；unbind 填其一；query 填其一。角色已绑其他QQ或QQ已绑其他角色时设 force=true 强制改绑。
+
+        Args:
+            sub_action(string): query / bind / unbind
+            player_name(string): 游戏内玩家名；bind 必填；unbind/query 可与 qq 二选一
+            qq(string): QQ 号；bind 必填；unbind/query 可与 player_name 二选一
+            force(string): bind 时 true 表示强制改绑（先解旧绑再绑新）
+        """
+        is_mc = bool(event.get_extra("mc_ai_event"))
+        if not self._hub or self._binding_store is None:
+            return "弧光消息中枢尚未启动。"
+        if not is_mc and not self._is_tool_session_activated(event):
+            return (
+                "该会话尚未激活 Minecraft 工具。"
+                "请让插件管理员在本对话发送 /mc activate。"
+            )
+        action = str(sub_action or "query").strip().lower() or "query"
+        if action in ("get", "lookup", "status", "who"):
+            action = "query"
+        if action in ("bindqq", "绑定"):
+            action = "bind"
+        if action in ("unbindqq", "解绑", "unbind"):
+            action = "unbind"
+
+        if action != "query" and not self._can_manage_qq_binding(event):
+            return "没有权限：绑定/解绑他人仅限插件管理员、群主/群管，或游戏内 OP。"
+        # query：已激活即可（方便确认状态）；改动仍仅管理员
+        if action == "query":
+            return self._query_qq_binding_text(player_name=player_name, qq=qq)
+
+        admin_label = self._admin_label_for_binding(event)
+        if action == "bind":
+            force_flag = str(force or "").strip().lower() in {
+                "1",
+                "true",
+                "yes",
+                "y",
+                "强制",
+            }
+            return await self._admin_bind_qq(
+                player_name=player_name,
+                qq=qq,
+                force=force_flag,
+                admin_label=admin_label,
+            )
+        if action == "unbind":
+            return self._admin_unbind_qq(
+                player_name=player_name, qq=qq, admin_label=admin_label
+            )
+        return "sub_action 须为 query / bind / unbind"
 
     async def _process_ai_chat(self, data: dict) -> dict:
         """Run one Minecraft player message through AstrBot's conversation pipeline.

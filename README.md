@@ -115,8 +115,12 @@ AI Helper 使用独立连接：`register.role = "ai_helper"`，不会占用子�
 | | | `dimension` | 否 | 空 | 维度，如 `minecraft:overworld`；空表示不限 |
 | | | `minutes` | 否 | `30` | 模型换算后的回溯分钟数 |
 | | | `server` | 否 | 空 | **建议留空搜全服** |
+| `mc_qq_binding` | query：已激活即可；bind/unbind：仅管理员 | `sub_action` | 否 | `query` | `query` / `bind` / `unbind` |
+| | | `player_name` | bind 必填；其它与 qq 二选一 | | 游戏角色名（bind 经群服互通解析弧光核心） |
+| | | `qq` | bind 必填；其它与 player_name 二选一 | | QQ 号 |
+| | | `force` | bind 时可选 | | `true` 强制改绑（先解旧绑） |
 
-权限补充：QQ 群里「管理员」= 插件管理员 / 超级管理员，或能识别出的群主 / 群管。超级管理员映射为 AI Helper **代理服主**，普通管理员映射为 **管理员**，已绑定自救用户映射为 **助手**。`mc_run_command` 对已绑定用户开放 tp / effect / spawnpoint 等自救，且只能打在本人绑定角色上；未绑定用户不能改世界。**已绑定用户**可调用 `mc_economy`（`sub_action=query`）查本人余额；查他人或 change 仍仅管理员。游戏内对话会透传 AI Helper 发来的 `permission_level`。
+权限补充：QQ 群里「管理员」= 插件管理员 / 超级管理员，或能识别出的群主 / 群管。超级管理员映射为 AI Helper **代理服主**，普通管理员映射为 **管理员**，已绑定自救用户映射为 **助手**。`mc_run_command` 对已绑定用户开放 tp / effect / spawnpoint 等自救，且只能打在本人绑定角色上；未绑定用户不能改世界。**已绑定用户**可调用 `mc_economy`（`sub_action=query`）查本人余额；查他人或 change 仍仅管理员。**`mc_qq_binding`** 在中枢本地处理（不经 AI Helper）；游戏内需 OP/管理员权限。游戏内对话会透传 AI Helper 发来的 `permission_level`。
 
 ## 启停与连接提示
 
