@@ -48,6 +48,8 @@ _MC_AI_IDENTITY_HINT = (
     "mc_release_player / mc_list_prisoners，不要用 mc_run_command 去跑 /jail。"
     "管理员帮别人绑定或解绑 QQ 与游戏角色时，必须调用 mc_qq_binding"
     "（sub_action=bind/unbind/query），不要编造绑定状态；force=true 可强制改绑。"
+    "qq 参数是平台用户 ID：可为传统数字 QQ，或 QQ 官方机器人的 member_openid 字符串；"
+    "用户已 @对方时 qq 应留空让工具自动解析，禁止把群名片当 qq。"
     "查询玩家位置、近期行为、打了谁、被谁打、坐标附近发生过什么时，必须调用 "
     "mc_skyeye_player / mc_skyeye_combat / mc_skyeye_location，禁止编造。"
     "天眼不要求玩家在线。不知道在哪台服时 server 必须留空，工具会搜索全部已连接服务器。"
@@ -80,6 +82,7 @@ _QQ_MC_TOOL_HINT = (
     "未绑定用户无权执行改世界类指令，需先 /mc 绑定 <玩家名>。"
     "管理员帮别人绑定/解绑 QQ 与游戏角色时，必须调用 mc_qq_binding"
     "（sub_action=bind/unbind/query），不要让用户自己猜指令；force=true 可强制改绑。"
+    "qq 可为数字 QQ 或 member_openid；消息里已 @对方时 qq 留空即可，不要传群名片。"
     "effect 只能用于药水效果。劈闪电必须用 execute at 玩家名 run summon lightning_bolt ~ ~ ~。"
 )
 
@@ -2121,6 +2124,80 @@ class EndstoneArcMessageCenter(Star):
         uid = self._sender_id(event)
         return f"qq:{uid}" if uid else "admin"
 
+    @staticmethod
+    def _is_valid_platform_user_id(user_id: str) -> bool:
+        """Accept classic QQ digits or QQ Official / other platform string ids."""
+        text = str(user_id or "").strip()
+        if not text or any(ch.isspace() for ch in text):
+            return False
+        if text.isdigit():
+            return 5 <= len(text) <= 11
+        # member_openid / user_openid / similar opaque ids
+        if not re.fullmatch(r"[A-Za-z0-9_-]{8,128}", text):
+            return False
+        # Must contain at least one letter or underscore (not a short pure digit miss)
+        return bool(re.search(r"[A-Za-z_]", text))
+
+    async def _resolve_binding_user_id(
+        self, event: AstrMessageEvent, qq_hint: str
+    ) -> tuple[str, str]:
+        """Resolve platform user id from tool arg and/or @ mentions in the event.
+
+        Returns:
+            ``(user_id, error)``. Exactly one side is non-empty.
+        """
+        hint = str(qq_hint or "").strip()
+        # Strip common wrappers the model may copy from prompts.
+        if hint.startswith("<@") and hint.endswith(">"):
+            hint = hint[2:-1].strip()
+        if hint.startswith("@"):
+            hint = hint[1:].strip()
+
+        if self._is_valid_platform_user_id(hint):
+            return hint, ""
+
+        raw_text = extract_event_raw_text(event)
+        mentioned = self._extract_mentioned_targets(event, raw_text)
+        resolved_mentions: list[tuple[str, str]] = []
+        for raw_id, name_hint in mentioned:
+            resolved = await self._resolve_admin_target(event, raw_id, name_hint)
+            resolved = str(resolved or raw_id).strip()
+            if self._is_valid_platform_user_id(resolved):
+                resolved_mentions.append((resolved, str(name_hint or "").strip()))
+
+        if not hint and len(resolved_mentions) == 1:
+            return resolved_mentions[0][0], ""
+
+        if hint and resolved_mentions:
+            for resolved, name_hint in resolved_mentions:
+                if hint in {resolved, name_hint}:
+                    return resolved, ""
+                if name_hint and (hint in name_hint or name_hint in hint):
+                    return resolved, ""
+
+        if hint:
+            # Treat as group card / nickname and try member-list resolve.
+            looked_up = await self._resolve_admin_target(event, "", hint)
+            looked_up = str(looked_up or "").strip()
+            if self._is_valid_platform_user_id(looked_up):
+                return looked_up, ""
+            return (
+                "",
+                f"「{hint}」不是有效的平台用户 ID。"
+                "请传入传统 QQ 号（5～11 位数字）、QQ 官方机器人的 member_openid，"
+                "或在本条消息里 @对方后留空 qq 参数。",
+            )
+
+        if len(resolved_mentions) > 1:
+            listing = "、".join(
+                f"{name or uid}" for uid, name in resolved_mentions
+            )
+            return "", f"消息里 @ 了多人（{listing}），请只 @ 一位或显式传入 qq。"
+        return (
+            "",
+            "请提供 qq（平台用户 ID），或在本条消息里 @对方。",
+        )
+
     def _query_qq_binding_text(self, player_name: str = "", qq: str = "") -> str:
         assert self._binding_store is not None
         store = self._binding_store
@@ -2157,6 +2234,7 @@ class EndstoneArcMessageCenter(Star):
     async def _admin_bind_qq(
         self,
         *,
+        event: AstrMessageEvent,
         player_name: str,
         qq: str,
         force: bool,
@@ -2165,11 +2243,11 @@ class EndstoneArcMessageCenter(Star):
         assert self._hub is not None and self._binding_store is not None
         store = self._binding_store
         name = str(player_name or "").strip()
-        qq_str = str(qq or "").strip()
-        if not name or not qq_str:
-            return "绑定需要同时提供 player_name（游戏名）与 qq（QQ号）"
-        if not qq_str.isdigit() or not (5 <= len(qq_str) <= 11):
-            return "QQ号无效：须为 5～11 位数字"
+        if not name:
+            return "绑定需要提供 player_name（游戏名）"
+        qq_str, resolve_error = await self._resolve_binding_user_id(event, qq)
+        if resolve_error:
+            return resolve_error
 
         if store.is_player_banned(name):
             return f"玩家 {name} 已被封禁，无法绑定"
@@ -2178,7 +2256,7 @@ class EndstoneArcMessageCenter(Star):
         if existing_for_qq and existing_for_qq.lower() != name.lower():
             if not force:
                 return (
-                    f"QQ {qq_str} 已绑定角色「{existing_for_qq}」。"
+                    f"平台用户 {qq_str} 已绑定角色「{existing_for_qq}」。"
                     "若要改绑请设 force=true，或先对该角色 unbind。"
                 )
             store.unbind_player_qq(existing_for_qq, admin_name=admin_label)
@@ -2201,46 +2279,68 @@ class EndstoneArcMessageCenter(Star):
         bound_qq = str(store.get_player_qq(target) or "").strip()
         if bound_qq:
             if bound_qq == qq_str:
-                return f"QQ {qq_str} 已与「{target}」绑定，无需重复操作"
+                return f"平台用户 {qq_str} 已与「{target}」绑定，无需重复操作"
             if not force:
                 return (
-                    f"角色「{target}」已绑定 QQ {bound_qq}。"
+                    f"角色「{target}」已绑定平台用户 {bound_qq}。"
                     "若要改绑请设 force=true，或先 unbind。"
                 )
             store.unbind_player_qq(target, admin_name=admin_label)
 
         if not store.bind_player_qq(target, player_xuid, qq_str):
             return "绑定失败，请稍后重试"
-        if self._hub.sync_group_card and self._hub.set_group_card:
+        # 传统数字 QQ 才改群名片；openid 等字符串 ID 不能 int()
+        if (
+            self._hub.sync_group_card
+            and self._hub.set_group_card
+            and qq_str.isdigit()
+        ):
             try:
                 await self._hub.set_group_card(int(qq_str), target)
             except Exception as error:
                 logger.warning(f"[{_HUB_DISPLAY}] 绑定工具改群名片失败: {error}")
-        return f"已将 QQ {qq_str} 绑定到游戏角色「{target}」（操作者 {admin_label}）"
+        return (
+            f"已将平台用户 {qq_str} 绑定到游戏角色「{target}」"
+            f"（操作者 {admin_label}）"
+        )
 
-    def _admin_unbind_qq(
-        self, *, player_name: str = "", qq: str = "", admin_label: str
+    async def _admin_unbind_qq(
+        self,
+        *,
+        event: AstrMessageEvent,
+        player_name: str = "",
+        qq: str = "",
+        admin_label: str,
     ) -> str:
         assert self._binding_store is not None
         store = self._binding_store
         name = str(player_name or "").strip()
-        qq_str = str(qq or "").strip()
-        if not name and not qq_str:
-            return "解绑需要提供 player_name 或 qq"
-        if not name and qq_str:
+        qq_hint = str(qq or "").strip()
+        if not name and not qq_hint:
+            # Allow @-only unbind
+            qq_str, resolve_error = await self._resolve_binding_user_id(event, "")
+            if resolve_error:
+                return resolve_error or "解绑需要提供 player_name、平台用户 ID，或 @ 对方"
             name = store.get_qq_player(qq_str)
             if not name:
-                return f"QQ {qq_str} 当前没有绑定的游戏角色"
+                return f"平台用户 {qq_str} 当前没有绑定的游戏角色"
+        elif not name and qq_hint:
+            qq_str, resolve_error = await self._resolve_binding_user_id(event, qq_hint)
+            if resolve_error:
+                return resolve_error
+            name = store.get_qq_player(qq_str)
+            if not name:
+                return f"平台用户 {qq_str} 当前没有绑定的游戏角色"
         canonical, data = store.find_player_entry(name)
         if not data:
             return f"找不到玩家「{name}」的绑定记录"
         bound = str(data.get("qq") or "").strip()
         if not bound:
-            return f"玩家「{canonical}」当前未绑定 QQ"
+            return f"玩家「{canonical}」当前未绑定平台用户"
         if not store.unbind_player_qq(canonical, admin_name=admin_label):
             return "解绑失败，请稍后重试"
         return (
-            f"已解除「{canonical}」与 QQ {bound} 的绑定"
+            f"已解除「{canonical}」与平台用户 {bound} 的绑定"
             f"（操作者 {admin_label}）"
         )
 
@@ -2253,12 +2353,12 @@ class EndstoneArcMessageCenter(Star):
         qq: str = "",
         force: str = "",
     ) -> str:
-        """管理 QQ 与游戏角色绑定。管理员可帮别人绑定/解绑/查询；普通人请自行 /mc 绑定。bind 需 player_name+qq；unbind 填其一；query 填其一。角色已绑其他QQ或QQ已绑其他角色时设 force=true 强制改绑。
+        """管理平台用户 ID 与游戏角色绑定。管理员可帮别人绑定/解绑/查询。qq 可为传统 QQ 号或 QQ 官方机器人 member_openid；消息里已 @ 对方时可把 qq 留空，工具自动读取，不要把群名片当 qq。bind 需 player_name；unbind/query 填 player_name 或 qq/@ 其一。force=true 可强制改绑。
 
         Args:
             sub_action(string): query / bind / unbind
             player_name(string): 游戏内玩家名；bind 必填；unbind/query 可与 qq 二选一
-            qq(string): QQ 号；bind 必填；unbind/query 可与 player_name 二选一
+            qq(string): 平台用户 ID（数字 QQ 或 openid）；已 @ 对方时可空；不要填群名片
             force(string): bind 时 true 表示强制改绑（先解旧绑再绑新）
         """
         is_mc = bool(event.get_extra("mc_ai_event"))
@@ -2279,9 +2379,16 @@ class EndstoneArcMessageCenter(Star):
 
         if action != "query" and not self._can_manage_qq_binding(event):
             return "没有权限：绑定/解绑他人仅限插件管理员、群主/群管，或游戏内 OP。"
-        # query：已激活即可（方便确认状态）；改动仍仅管理员
+
         if action == "query":
-            return self._query_qq_binding_text(player_name=player_name, qq=qq)
+            name = str(player_name or "").strip()
+            qq_hint = str(qq or "").strip()
+            qq_str = ""
+            if qq_hint or not name:
+                qq_str, _err = await self._resolve_binding_user_id(event, qq_hint)
+                if not qq_str and not name:
+                    return _err or "请提供 player_name、平台用户 ID，或 @ 对方"
+            return self._query_qq_binding_text(player_name=name, qq=qq_str)
 
         admin_label = self._admin_label_for_binding(event)
         if action == "bind":
@@ -2293,14 +2400,18 @@ class EndstoneArcMessageCenter(Star):
                 "强制",
             }
             return await self._admin_bind_qq(
+                event=event,
                 player_name=player_name,
                 qq=qq,
                 force=force_flag,
                 admin_label=admin_label,
             )
         if action == "unbind":
-            return self._admin_unbind_qq(
-                player_name=player_name, qq=qq, admin_label=admin_label
+            return await self._admin_unbind_qq(
+                event=event,
+                player_name=player_name,
+                qq=qq,
+                admin_label=admin_label,
             )
         return "sub_action 须为 query / bind / unbind"
 
