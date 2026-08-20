@@ -78,7 +78,7 @@ AI Helper 使用独立连接：`register.role = "ai_helper"`，不会占用子�
 | `mc_run_command` | 管理员；或已绑定用户仅限本人自救 | `command` | 是 | | 不含 `/` 的游戏指令。例：`effect Steve night_vision 30 0 true`；劈闪电：`execute at Steve run summon lightning_bolt ~ ~ ~`。权限受 AI Helper 三档限制；禁止 `stop` / `kill`（代理服主除外） |
 | | | `server` | 多开服时要填 | 空 | 目标服名称 / 编号 / 别名 |
 | `mc_landmarks` | 已激活即可（只读） | `server` | 多开服时要填 | 空 | 公开地标：出生点 / Warp / 公共领地 |
-| `mc_economy` | 仅管理员 | `player_name` / `xuid` | 其一 | | 弧光银行 |
+| `mc_economy` | query 查自己：已绑定即可；查他人或 change：仅管理员 | `player_name` / `xuid` | query 查自己时可空 | | 弧光银行 |
 | | | `sub_action` | 否 | `query` | `query` 或 `change` |
 | | | `delta` / `amount` | change 时要填 | | 正加负减 |
 | | | `server` | 多开服时要填 | 空 | 目标服 |
@@ -114,7 +114,7 @@ AI Helper 使用独立连接：`register.role = "ai_helper"`，不会占用子�
 | | | `minutes` | 否 | `30` | 模型换算后的回溯分钟数 |
 | | | `server` | 否 | 空 | **建议留空搜全服** |
 
-权限补充：QQ 群里「管理员」= 插件管理员 / 超级管理员，或能识别出的群主 / 群管。超级管理员映射为 AI Helper **代理服主**，普通管理员映射为 **管理员**，已绑定自救用户映射为 **助手**。`mc_run_command` 对已绑定用户开放 tp / effect / spawnpoint 等自救，且只能打在本人绑定角色上；未绑定用户不能改世界。游戏内对话会透传 AI Helper 发来的 `permission_level`。
+权限补充：QQ 群里「管理员」= 插件管理员 / 超级管理员，或能识别出的群主 / 群管。超级管理员映射为 AI Helper **代理服主**，普通管理员映射为 **管理员**，已绑定自救用户映射为 **助手**。`mc_run_command` 对已绑定用户开放 tp / effect / spawnpoint 等自救，且只能打在本人绑定角色上；未绑定用户不能改世界。**已绑定用户**可调用 `mc_economy`（`sub_action=query`）查本人余额；查他人或 change 仍仅管理员。游戏内对话会透传 AI Helper 发来的 `permission_level`。
 
 ## 启停与连接提示
 
@@ -128,6 +128,7 @@ AI Helper 的 `ai_helper` 连接**不走**上述开停服播报。
 
 ## 更新日志
 
+- **1.7.1**：`mc_economy` 查询本人余额不再要求管理员；QQ 已绑定用户可查自己，查他人或 change 仍仅管理员。需 AI Helper ≥ 2.1.3。
 - **1.7.0**：对齐 AI Helper ≥ 2.1.1：新增 `mc_landmarks` / `mc_economy` / `mc_land` / `mc_arc_tp`；工具调用回传三档 `permission_level`；系统提示补充弧光核心能力说明。
 - **1.6.14**：工具参数整理：查询类去掉无用的 `reason`；入狱时长改为 `minutes`（与天眼同一单位）；`reason` 仅保留为监狱入狱原因。
 - **1.6.13**：天眼查询不再要求指定服务器或玩家在线：`server` 留空（或指定服查不到）时会搜索全部已连接服务器。回溯时长由大模型按用户说法写入 `minutes`（一天=1440）。

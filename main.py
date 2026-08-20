@@ -39,7 +39,8 @@ _MC_AI_IDENTITY_HINT = (
     "必须调用对应工具查询或执行，禁止凭空编造数字或名单。"
     "问路标、出生点、公共传送点、公共领地时优先看系统提示里的地标清单；"
     "需要最新列表时调用 mc_landmarks（只读）。"
-    "银行余额用 mc_economy，领地查询用 mc_land，传送到 Home/Warp/坐标用 mc_arc_tp；"
+    "银行：查自己余额用 mc_economy（sub_action=query）；改别人或加减钱仅管理员。"
+    "领地查询用 mc_land，传送到 Home/Warp/坐标用 mc_arc_tp；"
     "禁止用 mc_run_command 代替这些弧光核心工具。"
     "要把玩家关进监狱、释放或查看在押名单时，必须调用 mc_jail_player / "
     "mc_release_player / mc_list_prisoners，不要用 mc_run_command 去跑 /jail。"
@@ -57,7 +58,9 @@ _QQ_MC_TOOL_HINT = (
     "当前对话已通过 /mc activate 接入弧光 Minecraft 中枢。"
     "查询在线、TPS、服务器信息或执行游戏指令时必须调用对应工具，禁止编造。"
     "问路标/出生点/公共传送点/公共领地用 mc_landmarks（只读，已激活即可）。"
-    "银行用 mc_economy，领地用 mc_land，传送 Home/Warp/坐标用 mc_arc_tp；"
+    "已绑定游戏角色的用户可调用 mc_economy（sub_action=query）查询本人余额；"
+    "查询他人或 change 加减钱仅管理员。"
+    "领地用 mc_land，传送 Home/Warp/坐标用 mc_arc_tp；"
     "不要用 mc_run_command 代替这些弧光核心工具。"
     "关押玩家用 mc_jail_player，释放用 mc_release_player，查看在押用 mc_list_prisoners。"
     "查玩家位置/近期行为用 mc_skyeye_player，查打架用 mc_skyeye_combat，查坐标附近用 mc_skyeye_location。"
@@ -66,8 +69,8 @@ _QQ_MC_TOOL_HINT = (
     "改世界/查在线等其它工具在多开服时仍须填写 server。"
     "有多台 Minecraft 服务器时，除天眼外先调用 mc_list_servers，再填写 server"
     "（名称、编号或别名），不要猜测。"
-    "在能识别出 QQ 群主/群管身份的群聊里，mc_run_command / 入狱 / 天眼 / 银行 / 领地 / 弧光传送"
-    "仅管理员可真正执行；mc_landmarks 只读例外。"
+    "在能识别出 QQ 群主/群管身份的群聊里，mc_run_command / 入狱 / 天眼 / 改银行 / 查他人余额 / 领地 / 弧光传送"
+    "仅管理员可真正执行；mc_landmarks 只读例外；已绑定用户可查自己余额。"
     "已绑定游戏角色的 QQ 用户可在求助时使用 tp / effect / spawnpoint 等自救指令，且仅限本人绑定角色；"
     "未绑定用户无权执行改世界类指令，需先 /mc 绑定 <玩家名>。"
     "effect 只能用于药水效果。劈闪电必须用 execute at 玩家名 run summon lightning_bolt ~ ~ ~。"
@@ -1616,23 +1619,23 @@ class EndstoneArcMessageCenter(Star):
         permission_level = self._resolve_tool_permission_level(event)
         payload.setdefault("permission_level", permission_level)
         if is_mc:
+            caller_name = str(event.get_extra("mc_ai_player_name") or "").strip()
+            caller_xuid = str(event.get_extra("mc_ai_xuid") or "").strip()
             payload.setdefault("is_op", bool(event.get_extra("mc_ai_is_op")))
-            payload.setdefault(
-                "player_name", str(event.get_extra("mc_ai_player_name") or "")
-            )
-            payload.setdefault("player_xuid", str(event.get_extra("mc_ai_xuid") or ""))
+            payload.setdefault("player_name", caller_name)
+            payload.setdefault("player_xuid", caller_xuid)
+            payload["caller_player_name"] = caller_name
+            payload["caller_xuid"] = caller_xuid
         else:
             bound_name = self._qq_bound_player_name(event)
             is_admin = self._qq_can_run_command(event)
+            payload.setdefault("is_op", is_admin)
+            if bound_name:
+                payload.setdefault("bound_player_name", bound_name)
             if require_bound_or_admin:
-                payload.setdefault("is_op", is_admin)
                 payload.setdefault(
                     "is_bound_self_help", bool(bound_name) and not is_admin
                 )
-                if bound_name:
-                    payload.setdefault("bound_player_name", bound_name)
-            else:
-                payload.setdefault("is_op", is_admin)
             payload.setdefault(
                 "player_name",
                 bound_name
@@ -1640,6 +1643,8 @@ class EndstoneArcMessageCenter(Star):
                 or str(event.get_sender_name() or ""),
             )
             payload.setdefault("player_xuid", "")
+            payload["caller_player_name"] = bound_name
+            payload["caller_xuid"] = ""
 
         timeout = 30.0 if action in _SKYEYE_FANOUT_ACTIONS else 20.0
         if action in _SKYEYE_FANOUT_ACTIONS and not str(server or "").strip():
@@ -1767,10 +1772,10 @@ class EndstoneArcMessageCenter(Star):
         xuid: str = "",
         server: str = "",
     ) -> str:
-        """弧光银行：查询或变动玩家余额。查钱、扣款、加钱时必须调用，不要用 mc_run_command。sub_action=query 查询；change 时传 delta（正加负减）。仅管理员。
+        """弧光银行：查询或变动玩家余额。查钱、扣款、加钱时必须调用，不要用 mc_run_command。sub_action=query 查询本人余额（已绑定用户可查自己）；change 加减钱或查他人仅管理员。
 
         Args:
-            player_name(string): 游戏内玩家名；可与 xuid 二选一
+            player_name(string): 游戏内玩家名；可与 xuid 二选一。查自己时可留空
             sub_action(string): query 或 change
             delta(string): change 时的变动金额，正数加钱、负数扣钱
             amount(string): 同 delta，二选一即可
@@ -1779,9 +1784,31 @@ class EndstoneArcMessageCenter(Star):
         """
         name = str(player_name or "").strip()
         xuid_val = str(xuid or "").strip()
-        if not name and not xuid_val:
-            return "需要 player_name 或 xuid"
         action = str(sub_action or "query").strip().lower() or "query"
+        is_mc = bool(event.get_extra("mc_ai_event"))
+        is_admin = is_mc or self._qq_can_run_command(event)
+        if not is_mc:
+            bound_name = self._qq_bound_player_name(event)
+            if action in ("change", "adjust", "add", "remove"):
+                if not self._qq_can_run_command(event):
+                    return "没有权限：加减银行余额仅限插件管理员、群主和群管理员。"
+            else:
+                if not self._qq_can_run_command(event):
+                    if not bound_name:
+                        return (
+                            "没有权限：请先使用 /mc 绑定 <玩家名> 后再查询自己的余额。"
+                        )
+                    if name and name.lower() != bound_name.lower():
+                        return "没有权限：已绑定用户只能查询自己绑定角色的余额。"
+                    name = bound_name
+                    xuid_val = ""
+                    is_admin = False
+        if not name and not xuid_val:
+            if is_mc:
+                name = str(event.get_extra("mc_ai_player_name") or "").strip()
+                xuid_val = str(event.get_extra("mc_ai_xuid") or "").strip()
+            if not name and not xuid_val:
+                return "需要 player_name 或 xuid"
         payload: dict = {
             "player_name": name,
             "xuid": xuid_val,
@@ -1791,12 +1818,14 @@ class EndstoneArcMessageCenter(Star):
         if delta_text:
             payload["delta"] = delta_text
             payload["amount"] = delta_text
+        mutating = action in ("change", "adjust", "add", "remove")
         return await self._call_mc_ai_tool(
             event,
             "economy",
             payload,
             server=server,
-            require_admin=True,
+            require_admin=mutating,
+            require_bound_or_admin=not mutating,
         )
 
     @filter.llm_tool(name="mc_land")
