@@ -78,10 +78,12 @@ AI Helper 使用独立连接：`register.role = "ai_helper"`，不会占用子�
 | `mc_run_command` | 管理员；或已绑定用户仅限本人自救 | `command` | 是 | | 不含 `/` 的游戏指令。例：`effect Steve night_vision 30 0 true`；劈闪电：`execute at Steve run summon lightning_bolt ~ ~ ~`。权限受 AI Helper 三档限制；禁止 `stop` / `kill`（代理服主除外） |
 | | | `server` | 多开服时要填 | 空 | 目标服名称 / 编号 / 别名 |
 | `mc_landmarks` | 已激活即可（只读） | `server` | 多开服时要填 | 空 | 公开地标：出生点 / Warp / 公共领地 |
-| `mc_economy` | query 查自己：已绑定即可；查他人或 change：仅管理员 | `player_name` / `xuid` | query 查自己时可空 | | 弧光银行 |
-| | | `sub_action` | 否 | `query` | `query` 或 `change` |
-| | | `delta` / `amount` | change 时要填 | | 正加负减 |
-| | | `server` | 多开服时要填 | 空 | 目标服 |
+| `mc_economy` | query 查自己、transfer 发自己的红包：已绑定即可；查他人或 change：仅管理员 | `player_name` / `xuid` | query 查自己时可空 | | 弧光银行（走核心跨服经济接口） |
+| | | `sub_action` | 否 | `query` | `query` / `transfer` / `change` |
+| | | `delta` / `amount` | transfer/change 时要填 | | transfer 为每人金额；change 正加负减 |
+| | | `targets` | transfer 时可选 | | 收款人，逗号分隔 |
+| | | `to_online` | transfer 时可选 | | `true` 发给当前服在线且非自己的玩家 |
+| | | `server` | 多开服时要填 | 空 | 目标服；银行数据跨服共通 |
 | `mc_land` | 仅管理员 | `sub_action` | 否 | `list` | `list` / `info` / `at` |
 | | | `player_name` / `xuid` | list 时其一 | | 玩家 |
 | | | `land_id` | info 时要填 | | 领地 ID |
@@ -128,6 +130,7 @@ AI Helper 的 `ai_helper` 连接**不走**上述开停服播报。
 
 ## 更新日志
 
+- **1.7.2**：`/mc 绑定` 用弧光核心玩家解析接口确认角色（跨服共通账号，不再只查中枢 `data.json`）；`mc_economy` 支持已绑定用户 `transfer` 从自己账户发红包。需 AI Helper ≥ 2.1.4。
 - **1.7.1**：`mc_economy` 查询本人余额不再要求管理员；QQ 已绑定用户可查自己，查他人或 change 仍仅管理员。需 AI Helper ≥ 2.1.3。
 - **1.7.0**：对齐 AI Helper ≥ 2.1.1：新增 `mc_landmarks` / `mc_economy` / `mc_land` / `mc_arc_tp`；工具调用回传三档 `permission_level`；系统提示补充弧光核心能力说明。
 - **1.6.14**：工具参数整理：查询类去掉无用的 `reason`；入狱时长改为 `minutes`（与天眼同一单位）；`reason` 仅保留为监狱入狱原因。

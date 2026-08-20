@@ -39,7 +39,9 @@ _MC_AI_IDENTITY_HINT = (
     "必须调用对应工具查询或执行，禁止凭空编造数字或名单。"
     "问路标、出生点、公共传送点、公共领地时优先看系统提示里的地标清单；"
     "需要最新列表时调用 mc_landmarks（只读）。"
-    "银行：查自己余额用 mc_economy（sub_action=query）；改别人或加减钱仅管理员。"
+    "银行：查自己余额用 mc_economy（sub_action=query）；"
+    "已绑定用户可用 transfer 从自己账户给别人发红包（amount 每人金额；targets 收款人或 to_online=true 发给在线玩家）。"
+    "查他人或 change 加减钱仅管理员。"
     "领地查询用 mc_land，传送到 Home/Warp/坐标用 mc_arc_tp；"
     "禁止用 mc_run_command 代替这些弧光核心工具。"
     "要把玩家关进监狱、释放或查看在押名单时，必须调用 mc_jail_player / "
@@ -59,6 +61,7 @@ _QQ_MC_TOOL_HINT = (
     "查询在线、TPS、服务器信息或执行游戏指令时必须调用对应工具，禁止编造。"
     "问路标/出生点/公共传送点/公共领地用 mc_landmarks（只读，已激活即可）。"
     "已绑定游戏角色的用户可调用 mc_economy（sub_action=query）查询本人余额；"
+    "也可 transfer 从自己账户发红包/转账（amount 每人；targets 或 to_online=true）；"
     "查询他人或 change 加减钱仅管理员。"
     "领地用 mc_land，传送 Home/Warp/坐标用 mc_arc_tp；"
     "不要用 mc_run_command 代替这些弧光核心工具。"
@@ -70,7 +73,7 @@ _QQ_MC_TOOL_HINT = (
     "有多台 Minecraft 服务器时，除天眼外先调用 mc_list_servers，再填写 server"
     "（名称、编号或别名），不要猜测。"
     "在能识别出 QQ 群主/群管身份的群聊里，mc_run_command / 入狱 / 天眼 / 改银行 / 查他人余额 / 领地 / 弧光传送"
-    "仅管理员可真正执行；mc_landmarks 只读例外；已绑定用户可查自己余额。"
+    "仅管理员可真正执行；mc_landmarks 只读例外；已绑定用户可查自己余额，并从自己账户发红包。"
     "已绑定游戏角色的 QQ 用户可在求助时使用 tp / effect / spawnpoint 等自救指令，且仅限本人绑定角色；"
     "未绑定用户无权执行改世界类指令，需先 /mc 绑定 <玩家名>。"
     "effect 只能用于药水效果。劈闪电必须用 execute at 玩家名 run summon lightning_bolt ~ ~ ~。"
@@ -1770,40 +1773,44 @@ class EndstoneArcMessageCenter(Star):
         delta: str = "",
         amount: str = "",
         xuid: str = "",
+        targets: str = "",
+        to_online: str = "",
         server: str = "",
     ) -> str:
-        """弧光银行：查询或变动玩家余额。查钱、扣款、加钱时必须调用，不要用 mc_run_command。sub_action=query 查询本人余额（已绑定用户可查自己）；change 加减钱或查他人仅管理员。
+        """弧光银行。query 查余额（已绑定可查自己）；transfer 从自己账户发红包/转账；change 加减钱仅管理员。发红包时 amount 为每人金额；targets 填收款人（逗号分隔），给当前在线玩家发则 to_online=true。
 
         Args:
-            player_name(string): 游戏内玩家名；可与 xuid 二选一。查自己时可留空
-            sub_action(string): query 或 change
-            delta(string): change 时的变动金额，正数加钱、负数扣钱
-            amount(string): 同 delta，二选一即可
+            player_name(string): query/change 的玩家名；transfer 时可空
+            sub_action(string): query / transfer / change
+            delta(string): change 时的变动金额，正加负减
+            amount(string): transfer 每人金额，或 change 的 delta
             xuid(string): 玩家 XUID；可与 player_name 二选一
-            server(string): 目标服务器名称、编号或别名；游戏内可留空；QQ 多开服必须填
+            targets(string): transfer 收款人，逗号分隔；发全员红包可填 online
+            to_online(string): true 时发给当前服在线且非自己的玩家
+            server(string): 目标服务器名称、编号或别名；游戏内可留空；QQ 多开服必须填。银行数据跨服共通，任意已连接 Helper 均可
         """
         name = str(player_name or "").strip()
         xuid_val = str(xuid or "").strip()
         action = str(sub_action or "query").strip().lower() or "query"
         is_mc = bool(event.get_extra("mc_ai_event"))
-        is_admin = is_mc or self._qq_can_run_command(event)
+        is_transfer = action in ("transfer", "pay", "send", "hongbao", "redpack", "红包")
+        mutating_admin = action in ("change", "adjust", "add", "remove")
         if not is_mc:
             bound_name = self._qq_bound_player_name(event)
-            if action in ("change", "adjust", "add", "remove"):
-                if not self._qq_can_run_command(event):
-                    return "没有权限：加减银行余额仅限插件管理员、群主和群管理员。"
-            else:
-                if not self._qq_can_run_command(event):
-                    if not bound_name:
-                        return (
-                            "没有权限：请先使用 /mc 绑定 <玩家名> 后再查询自己的余额。"
-                        )
-                    if name and name.lower() != bound_name.lower():
-                        return "没有权限：已绑定用户只能查询自己绑定角色的余额。"
-                    name = bound_name
-                    xuid_val = ""
-                    is_admin = False
-        if not name and not xuid_val:
+            is_admin = self._qq_can_run_command(event)
+            if mutating_admin and not is_admin:
+                return "没有权限：加减银行余额仅限插件管理员、群主和群管理员。"
+            if is_transfer:
+                if not is_admin and not bound_name:
+                    return "没有权限：请先使用 /mc 绑定 <玩家名> 后再用自己的余额发红包。"
+            elif action in ("query", "get", "balance", "") and not is_admin:
+                if not bound_name:
+                    return "没有权限：请先使用 /mc 绑定 <玩家名> 后再查询自己的余额。"
+                if name and name.lower() != bound_name.lower():
+                    return "没有权限：已绑定用户只能查询自己绑定角色的余额。"
+                name = bound_name
+                xuid_val = ""
+        if not is_transfer and not name and not xuid_val:
             if is_mc:
                 name = str(event.get_extra("mc_ai_player_name") or "").strip()
                 xuid_val = str(event.get_extra("mc_ai_xuid") or "").strip()
@@ -1813,19 +1820,20 @@ class EndstoneArcMessageCenter(Star):
             "player_name": name,
             "xuid": xuid_val,
             "sub_action": action,
+            "targets": str(targets or "").strip(),
+            "to_online": str(to_online or "").strip(),
         }
         delta_text = str(delta or "").strip() or str(amount or "").strip()
         if delta_text:
             payload["delta"] = delta_text
             payload["amount"] = delta_text
-        mutating = action in ("change", "adjust", "add", "remove")
         return await self._call_mc_ai_tool(
             event,
             "economy",
             payload,
             server=server,
-            require_admin=mutating,
-            require_bound_or_admin=not mutating,
+            require_admin=mutating_admin,
+            require_bound_or_admin=is_transfer or not mutating_admin,
         )
 
     @filter.llm_tool(name="mc_land")

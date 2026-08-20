@@ -641,6 +641,36 @@ class ArcHubServer:
             raise RuntimeError("AI 工具返回格式异常")
         return resp
 
+    async def _resolve_player_via_core(self, player_name: str) -> tuple[str, str]:
+        """Resolve a game name via arc_core player APIs on any connected helper.
+
+        Cross-server player records already live inside those APIs.
+        """
+        helpers = self.list_ai_helper_game_names()
+        last_error = ""
+        for game in helpers:
+            try:
+                resp = await self.call_ai_tool(
+                    game,
+                    "resolve_player",
+                    {"player_name": player_name},
+                    timeout=12,
+                )
+            except Exception as error:
+                last_error = str(error)
+                continue
+            if isinstance(resp, dict) and resp.get("ok"):
+                name = str(resp.get("player_name") or player_name).strip()
+                xuid = str(resp.get("xuid") or "").strip()
+                if name and xuid:
+                    return name, xuid
+            if isinstance(resp, dict):
+                last_error = str(resp.get("error") or last_error)
+        logger.warning(
+            f"[弧光EndStone消息中枢] 解析玩家 {player_name} 失败: {last_error or '无 AI Helper'}"
+        )
+        return "", ""
+
     async def _handle_ai_chat(
         self, server_name: str, ws: ServerConnection, data: dict
     ) -> None:
@@ -1234,7 +1264,7 @@ class ArcHubServer:
             return
 
         existing_for_qq = store.get_qq_player(qq_str)
-        if existing_for_qq and existing_for_qq != target_player_name:
+        if existing_for_qq and existing_for_qq.lower() != target_player_name.lower():
             await self.reply_qq(
                 reply_target,
                 f"{prefix}\n❌ 您的QQ已绑定游戏角色「{existing_for_qq}」\n"
@@ -1242,15 +1272,27 @@ class ArcHubServer:
             )
             return
 
-        if target_player_name not in store.binding_data:
-            await self.reply_qq(
-                reply_target,
-                f"{prefix}\n❌ 服务器记录中找不到名为「{target_player_name}」的玩家\n"
-                "💡 请先在游戏中至少登录一次，再于群内绑定",
+        canonical, stored = store.find_player_entry(target_player_name)
+        player_xuid = str((stored or {}).get("xuid") or "").strip()
+        if not player_xuid:
+            resolved_name, resolved_xuid = await self._resolve_player_via_core(
+                target_player_name
             )
-            return
+            if not resolved_xuid:
+                await self.reply_qq(
+                    reply_target,
+                    f"{prefix}\n❌ 服务器记录中找不到名为「{target_player_name}」的玩家\n"
+                    "💡 请先在游戏中至少登录一次，再于群内绑定",
+                )
+                return
+            canonical = store.ensure_player_record(resolved_name, resolved_xuid)
+            player_xuid = resolved_xuid
+        elif not canonical:
+            canonical = store.ensure_player_record(target_player_name, player_xuid)
 
-        if store.is_player_bound(target_player_name):
+        target_player_name = canonical or target_player_name
+
+        if store.is_player_bound(target_player_name, player_xuid):
             bound_qq = str(store.get_player_qq(target_player_name) or "")
             if bound_qq == qq_str:
                 await self.reply_qq(
@@ -1266,8 +1308,6 @@ class ArcHubServer:
                 )
             return
 
-        stored = store.binding_data.get(target_player_name) or {}
-        player_xuid = str(stored.get("xuid") or "").strip()
         if not store.bind_player_qq(target_player_name, player_xuid, qq_str):
             await self.reply_qq(
                 reply_target,

@@ -86,6 +86,55 @@ class BindingStore:
                 return data
         return {}
 
+    def find_player_entry(self, player_name: str) -> tuple[str, dict[str, Any]]:
+        """Return ``(canonical_name, record)`` with case-insensitive name match."""
+        name = str(player_name or "").strip()
+        if not name:
+            return "", {}
+        exact = self._binding_data.get(name)
+        if isinstance(exact, dict):
+            return name, exact
+        lowered = name.lower()
+        for key, data in self._binding_data.items():
+            if str(key).lower() == lowered and isinstance(data, dict):
+                return str(key), data
+        return "", {}
+
+    def ensure_player_record(self, player_name: str, player_xuid: str = "") -> str:
+        """Create or refresh a player row so group bind can succeed after first login."""
+        canonical, data = self.find_player_entry(player_name)
+        xuid = str(player_xuid or "").strip()
+        if data:
+            if xuid and not str(data.get("xuid") or "").strip():
+                data["xuid"] = xuid
+                self.save()
+            elif xuid and str(data.get("xuid") or "").strip() != xuid:
+                data["xuid"] = xuid
+                self.save()
+            return canonical
+        name = str(player_name or "").strip()
+        if not name:
+            return ""
+        self._binding_data[name] = {
+            "name": name,
+            "xuid": xuid,
+            "qq": "",
+            "bind_time": None,
+            "rebind_time": None,
+            "unbind_time": None,
+            "unbind_by": "",
+            "original_qq": "",
+            "previous_qq": "",
+            "is_banned": False,
+            "ban_time": None,
+            "ban_by": "",
+            "ban_reason": "",
+            "unban_time": None,
+            "unban_by": "",
+        }
+        self.save()
+        return name
+
     def is_player_bound(self, player_name: str, player_xuid: str | None = None) -> bool:
         if player_xuid:
             player_data = self._get_player_by_xuid(player_xuid)
@@ -102,7 +151,7 @@ class BindingStore:
         return bool(qq and str(qq).strip())
 
     def get_player_qq(self, player_name: str) -> str:
-        data = self._binding_data.get(player_name) or {}
+        _name, data = self.find_player_entry(player_name)
         return str(data.get("qq") or "")
 
     def resolve_bound_qq(self, player_name: str, player_xuid: str | None = None) -> str:
@@ -245,7 +294,7 @@ class BindingStore:
         return True
 
     def is_player_banned(self, player_name: str) -> bool:
-        data = self._binding_data.get(player_name) or {}
+        _name, data = self.find_player_entry(player_name)
         return bool(data.get("is_banned"))
 
     def ban_player(
