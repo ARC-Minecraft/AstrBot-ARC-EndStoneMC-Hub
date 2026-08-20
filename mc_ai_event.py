@@ -50,6 +50,7 @@ class McAiMessageEvent(AstrMessageEvent):
         message: str,
         extra_system_prompt: str = "",
         is_op: bool = False,
+        permission_level: str = "",
         channel: str = "public",
         bound_qq: str = "",
     ) -> None:
@@ -80,6 +81,7 @@ class McAiMessageEvent(AstrMessageEvent):
             "sender_id": user_id,
             "bound_qq": str(bound_qq or ""),
             "is_op": bool(is_op),
+            "permission_level": str(permission_level or ""),
             "channel": channel,
         }
         msg_obj.timestamp = int(time.time())
@@ -94,6 +96,7 @@ class McAiMessageEvent(AstrMessageEvent):
         self.set_extra("mc_ai_qq", str(bound_qq or ""))
         self.set_extra("mc_ai_player_name", str(player_name))
         self.set_extra("mc_ai_is_op", bool(is_op))
+        self.set_extra("mc_ai_permission_level", str(permission_level or "").strip())
         self.set_extra("mc_ai_channel", str(channel))
         if extra_system_prompt:
             self.set_extra("mc_ai_extra_system", extra_system_prompt)

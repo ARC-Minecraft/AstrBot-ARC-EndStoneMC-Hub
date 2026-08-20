@@ -33,7 +33,7 @@ EndstoneMC-ARC-QQ-Sync-Plugin（各 MC 子服）
 - QQ 绑定数据权威存储（`data.json` / data_rpc）
 - 可选同步群名片（`sync_group_card`）
 - **MC AI 对话 RPC**（`ai_chat`）：[AI Helper](https://github.com/ARC-Minecraft/EndstoneMC-ARC-AI-Helper) 将玩家消息送入 AstrBot 正式对话管线，人格 / 记忆由 AstrBot 维护。身份映射：已绑定则发送者 ID = **QQ 号**，未绑定则用 **XUID**；不传群号。弧光天星回复同样走弧光护卫关键词检测：命中则拦截原文，并对触发者施加与玩家自己说违禁词相同的处罚。服务角色 `ai_helper` 不占用子服编号、也不会播报开停服
-- **MC AI 服务器工具**（`ai_tool`）：给大模型提供 `mc_list_servers` / `mc_list_players` / `mc_get_tps` / `mc_server_info` / `mc_run_command` / `mc_jail_player` / `mc_release_player` / `mc_list_prisoners` / `mc_skyeye_player` / `mc_skyeye_combat` / `mc_skyeye_location`。游戏内打在消息来源服；外部对话需插件管理员先发 **`/mc activate`** 激活本会话（会话 ID 可为非数字字符串）。多开服通过 `server` 指定；**天眼查询 `server` 可留空，会搜索全部已连接服务器**（玩家不必在线）。能识别 QQ 群身份时，入狱 / 天眼 / 任意改世界指令仅管理员；**已绑定 QQ 用户**可在求助时对**本人绑定角色**使用 tp / effect / spawnpoint 等自救指令；**未绑定**用户无权执行改世界类工具。
+- **MC AI 服务器工具**（`ai_tool`）：给大模型提供 `mc_list_servers` / `mc_list_players` / `mc_get_tps` / `mc_server_info` / `mc_run_command` / `mc_landmarks` / `mc_economy` / `mc_land` / `mc_arc_tp` / `mc_jail_player` / `mc_release_player` / `mc_list_prisoners` / `mc_skyeye_player` / `mc_skyeye_combat` / `mc_skyeye_location`。游戏内打在消息来源服；外部对话需插件管理员先发 **`/mc activate`** 激活本会话（会话 ID 可为非数字字符串）。多开服通过 `server` 指定；**天眼查询 `server` 可留空，会搜索全部已连接服务器**（玩家不必在线）。工具会把三档 `permission_level`（助手 / 管理员 / 代理服主）回传给 AI Helper。能识别 QQ 群身份时，入狱 / 天眼 / 银行 / 领地 / 弧光传送 / 任意改世界指令仅管理员；**`mc_landmarks` 只读、已激活即可**；**已绑定 QQ 用户**可在求助时对**本人绑定角色**使用 tp / effect / spawnpoint 等自救指令；**未绑定**用户无权执行改世界类工具。
 
 ## 安装
 
@@ -75,8 +75,23 @@ AI Helper 使用独立连接：`register.role = "ai_helper"`，不会占用子�
 | `mc_list_players` | 已激活即可 | `server` | 多开服时要填 | 空 | 目标服名称 / 编号 / 别名 |
 | `mc_get_tps` | 已激活即可 | `server` | 多开服时要填 | 空 | 目标服名称 / 编号 / 别名 |
 | `mc_server_info` | 已激活即可 | `server` | 多开服时要填 | 空 | 目标服名称 / 编号 / 别名 |
-| `mc_run_command` | 管理员；或已绑定用户仅限本人自救 | `command` | 是 | | 不含 `/` 的游戏指令。例：`effect Steve night_vision 30 0 true`；劈闪电：`execute at Steve run summon lightning_bolt ~ ~ ~`。禁止 `stop` / `kill`；`gamemode` 仅 OP/管理员 |
+| `mc_run_command` | 管理员；或已绑定用户仅限本人自救 | `command` | 是 | | 不含 `/` 的游戏指令。例：`effect Steve night_vision 30 0 true`；劈闪电：`execute at Steve run summon lightning_bolt ~ ~ ~`。权限受 AI Helper 三档限制；禁止 `stop` / `kill`（代理服主除外） |
 | | | `server` | 多开服时要填 | 空 | 目标服名称 / 编号 / 别名 |
+| `mc_landmarks` | 已激活即可（只读） | `server` | 多开服时要填 | 空 | 公开地标：出生点 / Warp / 公共领地 |
+| `mc_economy` | 仅管理员 | `player_name` / `xuid` | 其一 | | 弧光银行 |
+| | | `sub_action` | 否 | `query` | `query` 或 `change` |
+| | | `delta` / `amount` | change 时要填 | | 正加负减 |
+| | | `server` | 多开服时要填 | 空 | 目标服 |
+| `mc_land` | 仅管理员 | `sub_action` | 否 | `list` | `list` / `info` / `at` |
+| | | `player_name` / `xuid` | list 时其一 | | 玩家 |
+| | | `land_id` | info 时要填 | | 领地 ID |
+| | | `x` / `y` / `z` / `dimension` | at 时要填坐标 | | 坐标与维度 |
+| | | `server` | 多开服时要填 | 空 | 目标服 |
+| `mc_arc_tp` | 仅管理员 | `player_name` | 是 | | 须在线 |
+| | | `sub_action` | 是 | | `home` / `warp` / `pos` |
+| | | `home_name` / `warp_name` / `name` | 视 sub_action | | 家名或 Warp 名 |
+| | | `x` / `y` / `z` / `dimension` | pos 时要填 | | 坐标 |
+| | | `server` | 多开服时要填 | 空 | 目标服 |
 | `mc_jail_player` | 仅管理员 | `player_name` | 是 | | 要关押的游戏内玩家名 |
 | | | `minutes` | 否 | 空 | 刑期**分钟**数，或 `-1` / `life` / `无期`；空则用服默认一键入狱时长 |
 | | | `reason` | 否 | 空 | 入狱原因，写入监狱插件 |
@@ -99,7 +114,7 @@ AI Helper 使用独立连接：`register.role = "ai_helper"`，不会占用子�
 | | | `minutes` | 否 | `30` | 模型换算后的回溯分钟数 |
 | | | `server` | 否 | 空 | **建议留空搜全服** |
 
-权限补充：QQ 群里「管理员」= 插件管理员 / 超级管理员，或能识别出的群主 / 群管。`mc_run_command` 对已绑定用户开放 tp / effect / spawnpoint 等自救，且只能打在本人绑定角色上；未绑定用户不能改世界。
+权限补充：QQ 群里「管理员」= 插件管理员 / 超级管理员，或能识别出的群主 / 群管。超级管理员映射为 AI Helper **代理服主**，普通管理员映射为 **管理员**，已绑定自救用户映射为 **助手**。`mc_run_command` 对已绑定用户开放 tp / effect / spawnpoint 等自救，且只能打在本人绑定角色上；未绑定用户不能改世界。游戏内对话会透传 AI Helper 发来的 `permission_level`。
 
 ## 启停与连接提示
 
@@ -113,6 +128,7 @@ AI Helper 的 `ai_helper` 连接**不走**上述开停服播报。
 
 ## 更新日志
 
+- **1.7.0**：对齐 AI Helper ≥ 2.1.1：新增 `mc_landmarks` / `mc_economy` / `mc_land` / `mc_arc_tp`；工具调用回传三档 `permission_level`；系统提示补充弧光核心能力说明。
 - **1.6.14**：工具参数整理：查询类去掉无用的 `reason`；入狱时长改为 `minutes`（与天眼同一单位）；`reason` 仅保留为监狱入狱原因。
 - **1.6.13**：天眼查询不再要求指定服务器或玩家在线：`server` 留空（或指定服查不到）时会搜索全部已连接服务器。回溯时长由大模型按用户说法写入 `minutes`（一天=1440）。
 - **1.6.12**：Minecraft 消息中枢里的弧光天星回复也走弧光护卫：命中关键词则拦截原文，并对触发玩家施加与自己说违禁词相同的处罚（监狱 / 群禁言 / 击杀 / 警告）。身份仍是绑定 QQ，否则 XUID。

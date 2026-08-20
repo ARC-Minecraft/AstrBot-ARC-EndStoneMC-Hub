@@ -37,6 +37,10 @@ _MC_AI_IDENTITY_HINT = (
     "执行游戏指令时，在玩家发来这条消息的那台 Minecraft 服务器上执行。"
     "玩家问在线人数、谁在线、TPS、服务器信息或要你执行游戏指令时，"
     "必须调用对应工具查询或执行，禁止凭空编造数字或名单。"
+    "问路标、出生点、公共传送点、公共领地时优先看系统提示里的地标清单；"
+    "需要最新列表时调用 mc_landmarks（只读）。"
+    "银行余额用 mc_economy，领地查询用 mc_land，传送到 Home/Warp/坐标用 mc_arc_tp；"
+    "禁止用 mc_run_command 代替这些弧光核心工具。"
     "要把玩家关进监狱、释放或查看在押名单时，必须调用 mc_jail_player / "
     "mc_release_player / mc_list_prisoners，不要用 mc_run_command 去跑 /jail。"
     "查询玩家位置、近期行为、打了谁、被谁打、坐标附近发生过什么时，必须调用 "
@@ -52,6 +56,9 @@ _MC_AI_IDENTITY_HINT = (
 _QQ_MC_TOOL_HINT = (
     "当前对话已通过 /mc activate 接入弧光 Minecraft 中枢。"
     "查询在线、TPS、服务器信息或执行游戏指令时必须调用对应工具，禁止编造。"
+    "问路标/出生点/公共传送点/公共领地用 mc_landmarks（只读，已激活即可）。"
+    "银行用 mc_economy，领地用 mc_land，传送 Home/Warp/坐标用 mc_arc_tp；"
+    "不要用 mc_run_command 代替这些弧光核心工具。"
     "关押玩家用 mc_jail_player，释放用 mc_release_player，查看在押用 mc_list_prisoners。"
     "查玩家位置/近期行为用 mc_skyeye_player，查打架用 mc_skyeye_combat，查坐标附近用 mc_skyeye_location。"
     "天眼不要求玩家在线。不知道人在哪台服时，server 必须留空（会搜全部已连接服务器），不要猜服名。"
@@ -59,7 +66,8 @@ _QQ_MC_TOOL_HINT = (
     "改世界/查在线等其它工具在多开服时仍须填写 server。"
     "有多台 Minecraft 服务器时，除天眼外先调用 mc_list_servers，再填写 server"
     "（名称、编号或别名），不要猜测。"
-    "在能识别出 QQ 群主/群管身份的群聊里，mc_run_command / 入狱 / 天眼仅管理员可真正执行。"
+    "在能识别出 QQ 群主/群管身份的群聊里，mc_run_command / 入狱 / 天眼 / 银行 / 领地 / 弧光传送"
+    "仅管理员可真正执行；mc_landmarks 只读例外。"
     "已绑定游戏角色的 QQ 用户可在求助时使用 tp / effect / spawnpoint 等自救指令，且仅限本人绑定角色；"
     "未绑定用户无权执行改世界类指令，需先 /mc 绑定 <玩家名>。"
     "effect 只能用于药水效果。劈闪电必须用 execute at 玩家名 run summon lightning_bolt ~ ~ ~。"
@@ -1334,6 +1342,23 @@ class EndstoneArcMessageCenter(Star):
             return False
         return self._qq_sender_role(event) in {"owner", "admin"}
 
+    def _resolve_tool_permission_level(self, event: AstrMessageEvent) -> str:
+        """Map MC / QQ caller to AI Helper three-tier permission_level."""
+        if event.get_extra("mc_ai_event"):
+            level = str(event.get_extra("mc_ai_permission_level") or "").strip()
+            if level:
+                return level
+            if bool(event.get_extra("mc_ai_is_op")):
+                return "admin"
+            return "assistant"
+        if self._is_super_admin(event):
+            return "proxy_owner"
+        if self._qq_can_run_command(event):
+            return "admin"
+        if self._qq_bound_player_name(event):
+            return "assistant"
+        return "assistant"
+
     def _format_ai_helper_listing(self) -> str:
         if not self._hub:
             return ""
@@ -1588,6 +1613,8 @@ class EndstoneArcMessageCenter(Star):
             payload["minutes"] = str(
                 self._parse_duration_minutes(str(payload.get("minutes") or ""))
             )
+        permission_level = self._resolve_tool_permission_level(event)
+        payload.setdefault("permission_level", permission_level)
         if is_mc:
             payload.setdefault("is_op", bool(event.get_extra("mc_ai_is_op")))
             payload.setdefault(
@@ -1716,6 +1743,158 @@ class EndstoneArcMessageCenter(Star):
             {"command": command_line},
             server=server,
             require_bound_or_admin=True,
+        )
+
+    @filter.llm_tool(name="mc_landmarks")
+    async def mc_landmarks(
+        self, event: AstrMessageEvent, server: str = ""
+    ) -> str:
+        """查询本服公开地标：出生点、公共传送点(Warp)、公共领地/功能区。问路标、功能建筑、出生点时调用；只读，已激活即可。系统提示若已有地标清单可优先引用，需要最新数据再调本工具。
+
+        Args:
+            server(string): 目标服务器名称、编号或别名；游戏内可留空；QQ 多开服必须填
+        """
+        return await self._call_mc_ai_tool(event, "landmarks", server=server)
+
+    @filter.llm_tool(name="mc_economy")
+    async def mc_economy(
+        self,
+        event: AstrMessageEvent,
+        player_name: str = "",
+        sub_action: str = "query",
+        delta: str = "",
+        amount: str = "",
+        xuid: str = "",
+        server: str = "",
+    ) -> str:
+        """弧光银行：查询或变动玩家余额。查钱、扣款、加钱时必须调用，不要用 mc_run_command。sub_action=query 查询；change 时传 delta（正加负减）。仅管理员。
+
+        Args:
+            player_name(string): 游戏内玩家名；可与 xuid 二选一
+            sub_action(string): query 或 change
+            delta(string): change 时的变动金额，正数加钱、负数扣钱
+            amount(string): 同 delta，二选一即可
+            xuid(string): 玩家 XUID；可与 player_name 二选一
+            server(string): 目标服务器名称、编号或别名；游戏内可留空；QQ 多开服必须填
+        """
+        name = str(player_name or "").strip()
+        xuid_val = str(xuid or "").strip()
+        if not name and not xuid_val:
+            return "需要 player_name 或 xuid"
+        action = str(sub_action or "query").strip().lower() or "query"
+        payload: dict = {
+            "player_name": name,
+            "xuid": xuid_val,
+            "sub_action": action,
+        }
+        delta_text = str(delta or "").strip() or str(amount or "").strip()
+        if delta_text:
+            payload["delta"] = delta_text
+            payload["amount"] = delta_text
+        return await self._call_mc_ai_tool(
+            event,
+            "economy",
+            payload,
+            server=server,
+            require_admin=True,
+        )
+
+    @filter.llm_tool(name="mc_land")
+    async def mc_land(
+        self,
+        event: AstrMessageEvent,
+        player_name: str = "",
+        sub_action: str = "list",
+        land_id: str = "",
+        dimension: str = "",
+        x: str = "",
+        y: str = "",
+        z: str = "",
+        xuid: str = "",
+        server: str = "",
+    ) -> str:
+        """弧光领地查询。list=某人领地列表；info=按 land_id 详情；at=某坐标所在领地。不要用 mc_run_command。仅管理员。
+
+        Args:
+            player_name(string): list 时的玩家名；可与 xuid 二选一
+            sub_action(string): list / info / at
+            land_id(string): info 时的领地 ID
+            dimension(string): at 时的维度，可空
+            x(string): at 时的 X
+            y(string): at 时的 Y
+            z(string): at 时的 Z
+            xuid(string): 玩家 XUID；可与 player_name 二选一
+            server(string): 目标服务器名称、编号或别名；游戏内可留空；QQ 多开服必须填
+        """
+        action = str(sub_action or "list").strip().lower() or "list"
+        return await self._call_mc_ai_tool(
+            event,
+            "land",
+            {
+                "player_name": str(player_name or "").strip(),
+                "xuid": str(xuid or "").strip(),
+                "sub_action": action,
+                "land_id": str(land_id or "").strip(),
+                "dimension": str(dimension or "").strip(),
+                "x": str(x or "").strip(),
+                "y": str(y or "").strip(),
+                "z": str(z or "").strip(),
+            },
+            server=server,
+            require_admin=True,
+        )
+
+    @filter.llm_tool(name="mc_arc_tp")
+    async def mc_arc_tp(
+        self,
+        event: AstrMessageEvent,
+        player_name: str,
+        sub_action: str,
+        home_name: str = "",
+        warp_name: str = "",
+        name: str = "",
+        dimension: str = "",
+        x: str = "",
+        y: str = "",
+        z: str = "",
+        server: str = "",
+    ) -> str:
+        """弧光传送：把在线玩家送到 Home / Warp / 坐标。送公共传送点用 warp；送家用 home；送坐标用 pos。不要用 mc_run_command 代替。仅管理员。
+
+        Args:
+            player_name(string): 要传送的在线玩家名
+            sub_action(string): home / warp / pos
+            home_name(string): home 时的家名；可空表示默认家
+            warp_name(string): warp 时的公共传送点名
+            name(string): 可代替 home_name 或 warp_name
+            dimension(string): pos 时的维度，可空
+            x(string): pos 时的 X
+            y(string): pos 时的 Y
+            z(string): pos 时的 Z
+            server(string): 目标服务器名称、编号或别名；游戏内可留空；QQ 多开服必须填
+        """
+        pname = str(player_name or "").strip()
+        if not pname:
+            return "玩家名为空"
+        action = str(sub_action or "").strip().lower()
+        if action not in {"home", "warp", "pos"}:
+            return "sub_action 须为 home / warp / pos"
+        return await self._call_mc_ai_tool(
+            event,
+            "arc_tp",
+            {
+                "player_name": pname,
+                "sub_action": action,
+                "home_name": str(home_name or "").strip(),
+                "warp_name": str(warp_name or "").strip(),
+                "name": str(name or "").strip(),
+                "dimension": str(dimension or "").strip(),
+                "x": str(x or "").strip(),
+                "y": str(y or "").strip(),
+                "z": str(z or "").strip(),
+            },
+            server=server,
+            require_admin=True,
         )
 
     @filter.llm_tool(name="mc_jail_player")
@@ -1894,6 +2073,7 @@ class EndstoneArcMessageCenter(Star):
         extra_system = str(data.get("extra_system_prompt") or "").strip()
         channel = str(data.get("channel") or "public").strip() or "public"
         is_op = bool(data.get("is_op", False))
+        permission_level = str(data.get("permission_level") or "").strip()
         if not content:
             return {"ok": False, "error": "空消息"}
 
@@ -1902,7 +2082,14 @@ class EndstoneArcMessageCenter(Star):
             bound_qq = self._binding_store.resolve_bound_qq(player_name, player_xuid)
         sender_id = bound_qq or player_xuid or f"name_{player_name}"
 
-        status = "OP玩家" if is_op else "普通玩家"
+        if permission_level in {"代理服主", "proxy_owner", "owner", "服主"}:
+            status = "代理服主"
+        elif permission_level in {"管理员", "admin"} or is_op:
+            status = "管理员"
+        elif permission_level in {"助手", "assistant"}:
+            status = "助手"
+        else:
+            status = "OP玩家" if is_op else "普通玩家"
         channel_label = "GUI私聊" if channel == "gui" else "公开聊天"
         user_text = f"{player_name}({status})[{channel_label}]: {content}"
 
@@ -1914,6 +2101,7 @@ class EndstoneArcMessageCenter(Star):
             message=user_text,
             extra_system_prompt=extra_system,
             is_op=is_op,
+            permission_level=permission_level,
             channel=channel,
             bound_qq=bound_qq,
         )
