@@ -130,7 +130,8 @@ AI Helper 的 `ai_helper` 连接**不走**上述开停服播报。
 
 ## 更新日志
 
-- **1.7.3**：绑定改为调用 `player_basic_info`（弧光核心跨服玩家库）；兼容旧 action 名；旧版 Helper 会提示升级。需 AI Helper ≥ 2.1.5。
+- **1.7.4**：`/mc 绑定` 改走群服互通 `core_rpc` → QQ Sync → 弧光核心玩家库，不再经 AI Helper。需 QQ Sync ≥ 1.0.3。
+- **1.7.3**：绑定曾误走 AI Helper `player_basic_info`；已由 1.7.4 纠正为群服互通路线。
 - **1.7.2**：`/mc 绑定` 用弧光核心玩家解析接口确认角色（跨服共通账号，不再只查中枢 `data.json`）；`mc_economy` 支持已绑定用户 `transfer` 从自己账户发红包。需 AI Helper ≥ 2.1.4。
 - **1.7.1**：`mc_economy` 查询本人余额不再要求管理员；QQ 已绑定用户可查自己，查他人或 change 仍仅管理员。需 AI Helper ≥ 2.1.3。
 - **1.7.0**：对齐 AI Helper ≥ 2.1.1：新增 `mc_landmarks` / `mc_economy` / `mc_land` / `mc_arc_tp`；工具调用回传三档 `permission_level`；系统提示补充弧光核心能力说明。

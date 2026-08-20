@@ -264,6 +264,7 @@ class ArcHubServer:
         ) = None
         self.ai_chat_timeout = 180.0
         self._pending_ai_tool: dict[str, tuple[ServerConnection, asyncio.Future]] = {}
+        self._pending_core_rpc: dict[str, tuple[ServerConnection, asyncio.Future]] = {}
 
     def _ensure_server_numeric_id(self, server_name: str) -> int:
         if server_name not in self._server_numeric_id_by_name:
@@ -295,6 +296,7 @@ class ArcHubServer:
     async def stop(self) -> None:
         """Stop Hub and close all MC connections."""
         self._fail_pending_ai_tools("弧光消息中枢已停止")
+        self._fail_pending_core_rpcs("弧光消息中枢已停止")
         self._running = False
         for ws in list(self.connected_servers.values()):
             try:
@@ -434,6 +436,9 @@ class ArcHubServer:
             if was_service:
                 self._fail_pending_ai_tools("AI Helper 连接已断开", websocket)
             if server_name and not was_service:
+                self._fail_pending_core_rpcs(
+                    f"子服 [{server_name}] 已断开", websocket
+                )
                 self.connected_servers.pop(server_name, None)
                 # Hub WS drop is authoritative (force-killed MC may never send server_stop).
                 await self._broadcast_to_others(
@@ -480,6 +485,13 @@ class ArcHubServer:
         elif msg_type == "ai_tool_response":
             rid = str(data.get("request_id") or "")
             pending = self._pending_ai_tool.get(rid)
+            if pending:
+                _ws, fut = pending
+                if fut and not fut.done():
+                    fut.set_result(data)
+        elif msg_type == "core_rpc_response":
+            rid = str(data.get("request_id") or "")
+            pending = self._pending_core_rpc.get(rid)
             if pending:
                 _ws, fut = pending
                 if fut and not fut.done():
@@ -550,6 +562,64 @@ class ArcHubServer:
             if not fut.done():
                 fut.set_exception(exc)
             self._pending_ai_tool.pop(rid, None)
+
+    def _fail_pending_core_rpcs(
+        self, reason: str, websocket: ServerConnection | None = None
+    ) -> None:
+        """Wake pending QQ Sync core_rpc calls when a game server drops."""
+        exc = ConnectionError(reason)
+        for rid, (ws, fut) in list(self._pending_core_rpc.items()):
+            if websocket is not None and ws is not websocket:
+                continue
+            if not fut.done():
+                fut.set_exception(exc)
+            self._pending_core_rpc.pop(rid, None)
+
+    async def call_core_rpc(
+        self,
+        game_server: str,
+        action: str,
+        args: dict[str, Any] | None = None,
+        *,
+        timeout: float = 12,
+    ) -> dict[str, Any]:
+        """Ask QQ Sync on a game server to run an arc_core lookup (not AI Helper).
+
+        Args:
+            game_server: Connected Minecraft server name.
+            action: e.g. ``player_basic_info``.
+            args: Extra arguments for the action.
+            timeout: Seconds to wait for the reply.
+
+        Returns:
+            ``core_rpc_response`` payload from QQ Sync.
+        """
+        ws = self.connected_servers.get(str(game_server or "").strip())
+        if ws is None:
+            raise RuntimeError(f"服务器 [{game_server}] 的群服互通未连接")
+        request_id = str(uuid.uuid4())
+        fut = asyncio.get_running_loop().create_future()
+        self._pending_core_rpc[request_id] = (ws, fut)
+        await ws.send(
+            json.dumps(
+                {
+                    "type": "core_rpc",
+                    "request_id": request_id,
+                    "action": str(action),
+                    "args": args or {},
+                },
+                ensure_ascii=False,
+            )
+        )
+        try:
+            resp = await asyncio.wait_for(fut, timeout=max(5.0, float(timeout)))
+        except asyncio.TimeoutError as e:
+            raise TimeoutError(f"core_rpc 超时: {action}") from e
+        finally:
+            self._pending_core_rpc.pop(request_id, None)
+        if not isinstance(resp, dict):
+            raise RuntimeError("core_rpc 返回格式异常")
+        return resp
 
     def find_ai_helper_ws(self, game_server: str) -> ServerConnection | None:
         """Find the AI Helper WebSocket for a Minecraft server name.
@@ -642,45 +712,42 @@ class ArcHubServer:
         return resp
 
     async def _resolve_player_via_core(self, player_name: str) -> tuple[str, str]:
-        """Ask any connected helper to resolve a name via arc_core player APIs.
+        """Ask QQ Sync (群服互通) to resolve a name via arc_core player APIs.
 
-        Cross-server sync is handled inside arc_core (``player_basic_info`` /
-        shared DB), not in the hub.
+        Binding must not go through AI Helper. Cross-server sync lives inside
+        arc_core (``player_basic_info`` / shared DB); QQ Sync only calls the API.
         """
-        helpers = self.list_ai_helper_game_names()
-        if not helpers:
-            logger.warning("[弧光EndStone消息中枢] 解析玩家失败: 无 AI Helper 在线")
+        servers = self.connected_server_names()
+        if not servers:
+            logger.warning("[弧光EndStone消息中枢] 解析玩家失败: 无群服互通子服在线")
             return "", ""
-        actions = ("player_basic_info", "resolve_player", "lookup_player")
         last_error = ""
-        for game in helpers:
-            for action in actions:
-                try:
-                    resp = await self.call_ai_tool(
-                        game,
-                        action,
-                        {"player_name": player_name},
-                        timeout=12,
-                    )
-                except Exception as error:
-                    last_error = str(error)
-                    continue
-                if isinstance(resp, dict) and resp.get("ok"):
-                    name = str(resp.get("player_name") or player_name).strip()
-                    xuid = str(resp.get("xuid") or "").strip()
-                    if name and xuid:
-                        return name, xuid
-                if isinstance(resp, dict):
-                    err = str(resp.get("error") or "").strip()
-                    if err and "未知工具动作" not in err:
-                        last_error = err
-                    elif err:
-                        last_error = (
-                            f"{err}（请升级 AI Helper ≥ 2.1.5 并重启 Endstone）"
-                        )
+        for game in servers:
+            try:
+                resp = await self.call_core_rpc(
+                    game,
+                    "player_basic_info",
+                    {"player_name": player_name},
+                    timeout=12,
+                )
+            except Exception as error:
+                last_error = str(error)
+                continue
+            if not isinstance(resp, dict):
+                last_error = "core_rpc 返回格式异常"
+                continue
+            if resp.get("ok"):
+                result = resp.get("result") if isinstance(resp.get("result"), dict) else resp
+                name = str(result.get("player_name") or player_name).strip()
+                xuid = str(result.get("xuid") or "").strip()
+                if name and xuid:
+                    return name, xuid
+            err = str(resp.get("error") or "").strip()
+            if err:
+                last_error = err
         logger.warning(
             f"[弧光EndStone消息中枢] 解析玩家 {player_name} 失败: "
-            f"{last_error or '所有 Helper 均无记录'}"
+            f"{last_error or '所有子服均无记录'}"
         )
         return "", ""
 
