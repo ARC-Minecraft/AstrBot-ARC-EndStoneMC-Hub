@@ -2440,12 +2440,14 @@ class EndstoneArcMessageCenter(Star):
             bound_qq = self._binding_store.resolve_bound_qq(player_name, player_xuid)
         sender_id = bound_qq or player_xuid or f"name_{player_name}"
 
+        # Label shows requester identity (not AI capability ceiling).
         if permission_level in {"代理服主", "proxy_owner", "owner", "服主"}:
             status = "代理服主"
         elif permission_level in {"管理员", "admin"} or is_op:
             status = "管理员"
         elif permission_level in {"助手", "assistant"}:
-            status = "助手"
+            # Effective assistant tier: non-OP players after ceiling clamp.
+            status = "普通玩家"
         else:
             status = "OP玩家" if is_op else "普通玩家"
         channel_label = "GUI私聊" if channel == "gui" else "公开聊天"

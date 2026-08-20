@@ -134,6 +134,7 @@ AI Helper 的 `ai_helper` 连接**不走**上述开停服播报。
 
 ## 更新日志
 
+- **1.7.7**：MC AI 对话身份标签按请求者真实身份展示（普通玩家不再被标成「助手/管理员」误导模型）；配合 AI Helper 2.1.6 权限上限/身份分离。
 - **1.7.6**：`mc_qq_binding` 支持 QQ 官方机器人 `member_openid` 等字符串平台 ID；可从消息 @ 自动解析；不再强制 5～11 位数字 QQ。
 - **1.7.5**：新增 LLM 工具 `mc_qq_binding`（query/bind/unbind），管理员可对话帮人绑定/解绑；bind 仍走群服互通 `core_rpc` 解析玩家。
 - **1.7.4**：`/mc 绑定` 改走群服互通 `core_rpc` → QQ Sync → 弧光核心玩家库，不再经 AI Helper。需 QQ Sync ≥ 1.0.3。
