@@ -54,6 +54,8 @@ _MC_AI_IDENTITY_HINT = (
     "mc_skyeye_player / mc_skyeye_combat / mc_skyeye_location，禁止编造。"
     "天眼不要求玩家在线。不知道在哪台服时 server 必须留空，工具会搜索全部已连接服务器。"
     "minutes 必须按用户说的查询时长自己换算成分钟数再传入，例如一天=1440、一小时=60；用户没说时长才用 30。"
+    "查询模拟美股玩家盈亏排行时必须调用 mc_stock_leaderboard；"
+    "查某只股票现价/走势必须调用 mc_stock_quote（AAPL/TSLA/BTC-USD 等），禁止编造行情。"
     "优先调用 mc_run_command 执行其它指令；只有工具不可用时，才在可见回复里使用 "
     "[execution_command:实际游戏指令] 标记。"
     "effect 只能用于药水效果，例如 effect Steve slowness 20 0 true。"
@@ -73,11 +75,13 @@ _QQ_MC_TOOL_HINT = (
     "查玩家位置/近期行为用 mc_skyeye_player，查打架用 mc_skyeye_combat，查坐标附近用 mc_skyeye_location。"
     "天眼不要求玩家在线。不知道人在哪台服时，server 必须留空（会搜全部已连接服务器），不要猜服名。"
     "调用天眼时必须自己把用户说的时长换算成分钟写入 minutes，例如一天=1440、一小时=60。"
+    "查询模拟美股玩家盈亏排行用 mc_stock_leaderboard；查股价/走势用 mc_stock_quote。"
     "改世界/查在线等其它工具在多开服时仍须填写 server。"
     "有多台 Minecraft 服务器时，除天眼外先调用 mc_list_servers，再填写 server"
     "（名称、编号或别名），不要猜测。"
     "在能识别出 QQ 群主/群管身份的群聊里，mc_run_command / 入狱 / 天眼 / 改银行 / 查他人余额 / 领地 / 弧光传送"
-    "仅管理员可真正执行；mc_landmarks 只读例外；已绑定用户可查自己余额，并从自己账户发红包。"
+    "仅管理员可真正执行；mc_landmarks / mc_stock_leaderboard / mc_stock_quote 只读例外；"
+    "已绑定用户可查自己余额，并从自己账户发红包。"
     "已绑定游戏角色的 QQ 用户可在求助时使用 tp / effect / spawnpoint 等自救指令，且仅限本人绑定角色；"
     "未绑定用户无权执行改世界类指令，需先 /mc 绑定 <玩家名>。"
     "管理员帮别人绑定/解绑 QQ 与游戏角色时，必须调用 mc_qq_binding"
@@ -2099,6 +2103,65 @@ class EndstoneArcMessageCenter(Star):
             },
             server=server,
             require_admin=True,
+        )
+
+    @filter.llm_tool(name="mc_stock_leaderboard")
+    async def mc_stock_leaderboard(
+        self,
+        event: AstrMessageEvent,
+        mode: str = "relative",
+        top: str = "5",
+        bottom: str = "5",
+        player_name: str = "",
+        server: str = "",
+    ) -> str:
+        """查询服务器模拟美股插件的玩家盈亏排行榜（收益率/绝对盈亏）。问谁赚最多、亏最多、股票排行、某玩家盈亏时必须调用，禁止编造。只读，已激活即可。需目标服安装 UpsAndDowns。
+
+        Args:
+            mode(string): relative=收益率（默认）；absolute=绝对盈亏金额
+            top(string): 前 N 名，默认 5
+            bottom(string): 倒数 N 名，默认 5
+            player_name(string): 可选；只查该玩家名次与盈亏
+            server(string): 目标服务器名称、编号或别名；游戏内可留空；QQ 多开服必须填（通常填主服）
+        """
+        return await self._call_mc_ai_tool(
+            event,
+            "stock_leaderboard",
+            {
+                "mode": str(mode or "relative").strip(),
+                "top": str(top or "5").strip(),
+                "bottom": str(bottom or "5").strip(),
+                "player_name": str(player_name or "").strip(),
+            },
+            server=server,
+        )
+
+    @filter.llm_tool(name="mc_stock_quote")
+    async def mc_stock_quote(
+        self,
+        event: AstrMessageEvent,
+        symbol: str,
+        period: str = "day",
+        server: str = "",
+    ) -> str:
+        """查询单只股票或加密货币现价/走势（如 AAPL、TSLA、BTC-USD）。问股价、涨跌、走势时必须调用，禁止编造。只读，已激活即可。需目标服安装 UpsAndDowns。
+
+        Args:
+            symbol(string): 股票代码，如 AAPL
+            period(string): price=仅现价；minute/day/month=走势，默认 day
+            server(string): 目标服务器名称、编号或别名；游戏内可留空；QQ 多开服必须填（通常填主服）
+        """
+        code = str(symbol or "").strip()
+        if not code:
+            return "股票代码为空"
+        return await self._call_mc_ai_tool(
+            event,
+            "stock_quote",
+            {
+                "symbol": code,
+                "period": str(period or "day").strip(),
+            },
+            server=server,
         )
 
     def _can_manage_qq_binding(self, event: AstrMessageEvent) -> bool:
