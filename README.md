@@ -33,7 +33,7 @@ EndstoneMC-ARC-QQ-Sync-Plugin（各 MC 子服）
 - QQ 绑定数据权威存储（`data.json` / data_rpc）
 - 可选同步群名片（`sync_group_card`）
 - **MC AI 对话 RPC**（`ai_chat`）：[AI Helper](https://github.com/ARC-Minecraft/EndstoneMC-ARC-AI-Helper) 将玩家消息送入 AstrBot 正式对话管线，人格 / 记忆由 AstrBot 维护。身份映射：已绑定则发送者 ID = **QQ 号**，未绑定则用 **XUID**；不传群号。弧光天星回复同样走弧光护卫关键词检测：命中则拦截原文，并对触发者施加与玩家自己说违禁词相同的处罚。服务角色 `ai_helper` 不占用子服编号、也不会播报开停服
-- **MC AI 服务器工具**（`ai_tool`）：给大模型提供 `mc_list_servers` / `mc_list_players` / `mc_get_tps` / `mc_server_info` / `mc_run_command` / `mc_landmarks` / `mc_economy` / `mc_land` / `mc_arc_tp` / `mc_jail_player` / `mc_release_player` / `mc_list_prisoners` / `mc_skyeye_player` / `mc_skyeye_combat` / `mc_skyeye_location` / `mc_stock_leaderboard` / `mc_stock_quote`。游戏内打在消息来源服；外部对话需插件管理员先发 **`/mc activate`** 激活本会话（会话 ID 可为非数字字符串）。多开服通过 `server` 指定；**天眼查询 `server` 可留空，会搜索全部已连接服务器**（玩家不必在线）。工具会把三档 `permission_level`（助手 / 管理员 / 代理服主）回传给 AI Helper。能识别 QQ 群身份时，入狱 / 天眼 / 银行 / 领地 / 弧光传送 / 任意改世界指令仅管理员；**`mc_landmarks` / `mc_stock_leaderboard` / `mc_stock_quote` 只读、已激活即可**；**已绑定 QQ 用户**可在求助时对**本人绑定角色**使用 tp / effect / spawnpoint 等自救指令；**未绑定**用户无权执行改世界类工具。
+- **MC AI 服务器工具**（`ai_tool`）：给大模型提供 `mc_list_servers` / `mc_list_players` / `mc_get_tps` / `mc_server_info` / `mc_run_command` / `mc_landmarks` / `mc_economy` / `mc_land` / `mc_arc_tp` / `mc_jail_player` / `mc_release_player` / `mc_list_prisoners` / `mc_skyeye_player` / `mc_skyeye_combat` / `mc_skyeye_location` / `mc_stock_leaderboard` / `mc_stock_quote` / `mc_player_ip`。游戏内打在消息来源服；外部对话需插件管理员先发 **`/mc activate`** 激活本会话（会话 ID 可为非数字字符串）。多开服通过 `server` 指定；**天眼查询 `server` 可留空，会搜索全部已连接服务器**（玩家不必在线）。工具会把三档 `permission_level`（助手 / 管理员 / 代理服主）回传给 AI Helper。能识别 QQ 群身份时，入狱 / 天眼 / 银行 / 领地 / 弧光传送 / 任意改世界指令仅管理员；**`mc_landmarks` / `mc_stock_leaderboard` / `mc_stock_quote` / `mc_player_ip` 只读、已激活即可**；**已绑定 QQ 用户**可在求助时对**本人绑定角色**使用 tp / effect / spawnpoint 等自救指令；**未绑定**用户无权执行改世界类工具。
 
 ## 安装
 
@@ -120,6 +120,7 @@ AI Helper 使用独立连接：`register.role = "ai_helper"`，不会占用子�
 | | | `player_name` | 否 | 空 | 只查该玩家名次与盈亏 |
 | | | `server` | 多开服时要填 | 空 | 通常填主服（需安装 UpsAndDowns） |
 | `mc_stock_quote` | 已激活即可（只读） | `symbol` | 是 | | 股票代码，如 `AAPL` / `BTC-USD` |
+| `mc_player_ip` | 已激活即可（只读） | `player_name` | | 当前对话玩家 | 在线玩家连接原始 IP（返回 `ip=`）；助手仅查自己 |
 | | | `period` | 否 | `day` | `price` 仅现价；`minute` / `day` / `month` 走势 |
 | | | `server` | 多开服时要填 | 空 | 通常填主服 |
 | `mc_qq_binding` | query：已激活即可；bind/unbind：仅管理员 | `sub_action` | 否 | `query` | `query` / `bind` / `unbind` |
@@ -141,6 +142,7 @@ AI Helper 的 `ai_helper` 连接**不走**上述开停服播报。
 
 ## 更新日志
 
+- **1.7.9**：新增只读工具 `mc_player_ip`（在线玩家连接原始 IP），供模型传给下游地理/天气工具。需 AI Helper ≥ 2.1.9。
 - **1.7.8**：新增只读工具 `mc_stock_leaderboard` / `mc_stock_quote`，对接主服 UpsAndDowns 模拟美股排行与行情。需 AI Helper ≥ 2.1.7、UpsAndDowns ≥ 0.5.2。
 - **1.7.7**：MC AI 对话身份标签按请求者真实身份展示（普通玩家不再被标成「助手/管理员」误导模型）；配合 AI Helper 2.1.6 权限上限/身份分离。
 - **1.7.6**：`mc_qq_binding` 支持 QQ 官方机器人 `member_openid` 等字符串平台 ID；可从消息 @ 自动解析；不再强制 5～11 位数字 QQ。

@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import re
+
+import aiohttp
 
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, MessageEventResult, filter
@@ -56,6 +59,9 @@ _MC_AI_IDENTITY_HINT = (
     "minutes 必须按用户说的查询时长自己换算成分钟数再传入，例如一天=1440、一小时=60；用户没说时长才用 30。"
     "查询模拟美股玩家盈亏排行时必须调用 mc_stock_leaderboard；"
     "查某只股票现价/走势必须调用 mc_stock_quote（AAPL/TSLA/BTC-USD 等），禁止编造行情。"
+    "需要玩家连接 IP 时必须调用 mc_player_ip，从返回的 ip= 字段取出原始 IP；"
+    "要根据 IP 查归属地/基站级精确定位时必须再调用 mc_ip_locate（传入该 IP），禁止编造位置；"
+    "不填 player_name 则查当前对话玩家，助手只能查自己。"
     "优先调用 mc_run_command 执行其它指令；只有工具不可用时，才在可见回复里使用 "
     "[execution_command:实际游戏指令] 标记。"
     "effect 只能用于药水效果，例如 effect Steve slowness 20 0 true。"
@@ -76,11 +82,14 @@ _QQ_MC_TOOL_HINT = (
     "天眼不要求玩家在线。不知道人在哪台服时，server 必须留空（会搜全部已连接服务器），不要猜服名。"
     "调用天眼时必须自己把用户说的时长换算成分钟写入 minutes，例如一天=1440、一小时=60。"
     "查询模拟美股玩家盈亏排行用 mc_stock_leaderboard；查股价/走势用 mc_stock_quote。"
+    "需要玩家连接 IP 时调用 mc_player_ip，把返回的 ip= 原样取出；"
+    "查 IP 归属地/基站级精确定位必须再调用 mc_ip_locate，禁止编造位置。"
     "改世界/查在线等其它工具在多开服时仍须填写 server。"
     "有多台 Minecraft 服务器时，除天眼外先调用 mc_list_servers，再填写 server"
     "（名称、编号或别名），不要猜测。"
     "在能识别出 QQ 群主/群管身份的群聊里，mc_run_command / 入狱 / 天眼 / 改银行 / 查他人余额 / 领地 / 弧光传送"
-    "仅管理员可真正执行；mc_landmarks / mc_stock_leaderboard / mc_stock_quote 只读例外；"
+    "仅管理员可真正执行；mc_landmarks / mc_stock_leaderboard / mc_stock_quote / "
+    "mc_player_ip / mc_ip_locate 只读例外；"
     "已绑定用户可查自己余额，并从自己账户发红包。"
     "已绑定游戏角色的 QQ 用户可在求助时使用 tp / effect / spawnpoint 等自救指令，且仅限本人绑定角色；"
     "未绑定用户无权执行改世界类指令，需先 /mc 绑定 <玩家名>。"
@@ -1694,8 +1703,7 @@ class EndstoneArcMessageCenter(Star):
 
     @filter.llm_tool(name="mc_list_servers")
     async def mc_list_servers(self, event: AstrMessageEvent) -> str:
-        """列出当前已连接、可执行工具的 Minecraft 服务器名称与编号。多开服时先调用再填写其它工具的 server。
-        """
+        """列出当前已连接、可执行工具的 Minecraft 服务器名称与编号。多开服时先调用再填写其它工具的 server。"""
         if not self._hub:
             return "弧光消息中枢尚未启动。"
         if not event.get_extra("mc_ai_event") and not self._is_tool_session_activated(
@@ -1711,9 +1719,7 @@ class EndstoneArcMessageCenter(Star):
         return "已连接的 Minecraft 服务器：\n" + listing
 
     @filter.llm_tool(name="mc_list_players")
-    async def mc_list_players(
-        self, event: AstrMessageEvent, server: str = ""
-    ) -> str:
+    async def mc_list_players(self, event: AstrMessageEvent, server: str = "") -> str:
         """查询指定 Minecraft 服务器在线玩家名单与人数。玩家问起谁在线、有没有某某、在线人数时必须调用，禁止编造。
 
         Args:
@@ -1722,9 +1728,7 @@ class EndstoneArcMessageCenter(Star):
         return await self._call_mc_ai_tool(event, "list", server=server)
 
     @filter.llm_tool(name="mc_get_tps")
-    async def mc_get_tps(
-        self, event: AstrMessageEvent, server: str = ""
-    ) -> str:
+    async def mc_get_tps(self, event: AstrMessageEvent, server: str = "") -> str:
         """查询指定 Minecraft 服务器 TPS / MSPT 等性能数据。玩家问起卡不卡、TPS、延迟时必须调用，禁止编造。
 
         Args:
@@ -1733,9 +1737,7 @@ class EndstoneArcMessageCenter(Star):
         return await self._call_mc_ai_tool(event, "tps", server=server)
 
     @filter.llm_tool(name="mc_server_info")
-    async def mc_server_info(
-        self, event: AstrMessageEvent, server: str = ""
-    ) -> str:
+    async def mc_server_info(self, event: AstrMessageEvent, server: str = "") -> str:
         """查询指定 Minecraft 服务器基本信息（名称、版本、在线人数、运行时长等）。不要编造。
 
         Args:
@@ -1765,9 +1767,7 @@ class EndstoneArcMessageCenter(Star):
         )
 
     @filter.llm_tool(name="mc_landmarks")
-    async def mc_landmarks(
-        self, event: AstrMessageEvent, server: str = ""
-    ) -> str:
+    async def mc_landmarks(self, event: AstrMessageEvent, server: str = "") -> str:
         """查询本服公开地标：出生点、公共传送点(Warp)、公共领地/功能区。问路标、功能建筑、出生点时调用；只读，已激活即可。系统提示若已有地标清单可优先引用，需要最新数据再调本工具。
 
         Args:
@@ -1804,7 +1804,14 @@ class EndstoneArcMessageCenter(Star):
         xuid_val = str(xuid or "").strip()
         action = str(sub_action or "query").strip().lower() or "query"
         is_mc = bool(event.get_extra("mc_ai_event"))
-        is_transfer = action in ("transfer", "pay", "send", "hongbao", "redpack", "红包")
+        is_transfer = action in (
+            "transfer",
+            "pay",
+            "send",
+            "hongbao",
+            "redpack",
+            "红包",
+        )
         mutating_admin = action in ("change", "adjust", "add", "remove")
         if not is_mc:
             bound_name = self._qq_bound_player_name(event)
@@ -1813,7 +1820,9 @@ class EndstoneArcMessageCenter(Star):
                 return "没有权限：加减银行余额仅限插件管理员、群主和群管理员。"
             if is_transfer:
                 if not is_admin and not bound_name:
-                    return "没有权限：请先使用 /mc 绑定 <玩家名> 后再用自己的余额发红包。"
+                    return (
+                        "没有权限：请先使用 /mc 绑定 <玩家名> 后再用自己的余额发红包。"
+                    )
             elif action in ("query", "get", "balance", "") and not is_admin:
                 if not bound_name:
                     return "没有权限：请先使用 /mc 绑定 <玩家名> 后再查询自己的余额。"
@@ -1999,9 +2008,7 @@ class EndstoneArcMessageCenter(Star):
         )
 
     @filter.llm_tool(name="mc_list_prisoners")
-    async def mc_list_prisoners(
-        self, event: AstrMessageEvent, server: str = ""
-    ) -> str:
+    async def mc_list_prisoners(self, event: AstrMessageEvent, server: str = "") -> str:
         """查询指定 Minecraft 服务器当前在押玩家名单。问起谁在坐牢、监狱里有谁时必须调用，禁止编造。
 
         Args:
@@ -2164,6 +2171,189 @@ class EndstoneArcMessageCenter(Star):
             server=server,
         )
 
+    @filter.llm_tool(name="mc_player_ip")
+    async def mc_player_ip(
+        self,
+        event: AstrMessageEvent,
+        player_name: str = "",
+        server: str = "",
+    ) -> str:
+        """查询本服在线玩家的连接 IP（原始地址）。需要天气问候或 IP 精确定位时先调用本工具，从返回的 ip= 字段取出 IP，再原样传给 mc_ip_locate。禁止编造 IP。不填 player_name 则查当前对话玩家；助手只能查自己，管理员可查任意在线玩家。只读，已激活即可。
+
+        Args:
+            player_name(string): 可选；目标玩家名，默认当前对话/绑定玩家
+            server(string): 目标服务器名称、编号或别名；游戏内可留空；QQ 多开服必须填
+        """
+        return await self._call_mc_ai_tool(
+            event,
+            "player_ip",
+            {
+                "player_name": str(player_name or "").strip(),
+            },
+            server=server,
+        )
+
+    @filter.llm_tool(name="mc_ip_locate")
+    async def mc_ip_locate(self, event: AstrMessageEvent, ip: str) -> str:
+        """根据 IP 查询基站级/高精度归属地（国家省市县区、运营商、经纬度等）。玩家连接 IP 须先用 mc_player_ip 取得 ip= 再原样传入本工具；也可直接传入任意公网 IP。结果为 IP 库估算（移动网络常标为基站/WiFi），不是 GPS。禁止编造位置。只读，已激活即可。
+
+        Args:
+            ip(string): 要查询的 IPv4/IPv6；可带 ip= 前缀，工具会自动剥离
+        """
+        is_mc = bool(event.get_extra("mc_ai_event"))
+        if not is_mc and not self._is_tool_session_activated(event):
+            return (
+                "该会话尚未激活 Minecraft 工具。"
+                "请让插件管理员在本对话发送 /mc activate。"
+            )
+
+        raw = str(ip or "").strip()
+        if raw.lower().startswith("ip="):
+            raw = raw[3:].strip()
+        # Model may paste a whole mc_player_ip line; keep the first IP-looking token.
+        match = re.search(
+            r"(?:(?:\d{1,3}\.){3}\d{1,3}|[0-9a-fA-F:]{2,})",
+            raw,
+        )
+        if match:
+            raw = match.group(0)
+        if not raw:
+            return "IP 为空：请先调用 mc_player_ip 取得 ip=，或直接传入公网 IP。"
+
+        try:
+            addr = ipaddress.ip_address(raw)
+        except ValueError:
+            return f"无效 IP：{raw}"
+        if (
+            addr.is_private
+            or addr.is_loopback
+            or addr.is_link_local
+            or addr.is_reserved
+        ):
+            return f"ip={raw}\n无法定位：该地址为内网/保留地址，无公网归属地。"
+
+        timeout = aiohttp.ClientTimeout(total=8)
+        errors: list[str] = []
+        async with aiohttp.ClientSession(
+            timeout=timeout,
+            headers={"User-Agent": "AstrBot-EndstoneArc/1.7.9"},
+        ) as session:
+            # Primary: ip9 — Chinese ISP data; mobile often marked as 基站WiFi.
+            try:
+                async with session.get(
+                    "https://ip9.com.cn/get",
+                    params={"ip": raw},
+                ) as resp:
+                    if resp.status == 200:
+                        payload = await resp.json(content_type=None)
+                        data = (
+                            payload.get("data") if isinstance(payload, dict) else None
+                        )
+                        if (
+                            isinstance(payload, dict)
+                            and int(payload.get("ret") or 0) == 200
+                            and isinstance(data, dict)
+                        ):
+                            country = str(data.get("country") or "").strip()
+                            prov = str(data.get("prov") or "").strip()
+                            city = str(data.get("city") or "").strip()
+                            area = str(data.get("area") or "").strip()
+                            isp = str(data.get("isp") or "").strip()
+                            lng = str(data.get("lng") or "").strip()
+                            lat = str(data.get("lat") or "").strip()
+                            post = str(data.get("post_code") or "").strip()
+                            area_code = str(data.get("area_code") or "").strip()
+                            big = str(data.get("big_area") or "").strip()
+                            lines = [
+                                f"ip={raw}",
+                                f"国家={country or '未知'}",
+                                f"省={prov or '未知'}",
+                                f"市={city or '未知'}",
+                                f"区县={area or '未知'}",
+                                f"运营商={isp or '未知'}",
+                            ]
+                            if lng and lat:
+                                lines.append(f"经纬度={lng},{lat}")
+                            if post:
+                                lines.append(f"邮编={post}")
+                            if area_code:
+                                lines.append(f"区号={area_code}")
+                            if big:
+                                lines.append(f"大区={big}")
+                            precision = (
+                                "基站/移动网络级（IP 库估算）"
+                                if "基站" in isp
+                                else "区县级（IP 库估算）"
+                            )
+                            lines.append(f"精度={precision}")
+                            lines.append("说明=非 GPS 实测，供天气问候/大致位置参考")
+                            lines.append("来源=ip9")
+                            return "\n".join(lines)
+                        errors.append(f"ip9 返回异常: {payload!r}"[:160])
+                    else:
+                        errors.append(f"ip9 HTTP {resp.status}")
+            except Exception as exc:
+                errors.append(f"ip9: {exc}")
+
+            # Fallback: ip-api
+            try:
+                async with session.get(
+                    f"http://ip-api.com/json/{raw}",
+                    params={
+                        "lang": "zh-CN",
+                        "fields": (
+                            "status,message,country,regionName,city,district,"
+                            "lat,lon,isp,org,as,mobile,proxy,hosting,query"
+                        ),
+                    },
+                ) as resp:
+                    if resp.status == 200:
+                        data = await resp.json(content_type=None)
+                        if isinstance(data, dict) and data.get("status") == "success":
+                            isp = str(data.get("isp") or data.get("org") or "").strip()
+                            mobile = bool(data.get("mobile"))
+                            lines = [
+                                f"ip={raw}",
+                                f"国家={str(data.get('country') or '未知').strip()}",
+                                f"省={str(data.get('regionName') or '未知').strip()}",
+                                f"市={str(data.get('city') or '未知').strip()}",
+                                f"区县={str(data.get('district') or '未知').strip()}",
+                                f"运营商={isp or '未知'}",
+                            ]
+                            lat, lon = data.get("lat"), data.get("lon")
+                            if lat is not None and lon is not None:
+                                lines.append(f"经纬度={lon},{lat}")
+                            flags = []
+                            if mobile:
+                                flags.append("移动网络/基站侧")
+                            if data.get("proxy"):
+                                flags.append("代理")
+                            if data.get("hosting"):
+                                flags.append("机房/托管")
+                            if flags:
+                                lines.append(f"网络类型={','.join(flags)}")
+                            lines.append(
+                                "精度="
+                                + (
+                                    "基站/移动网络级（IP 库估算）"
+                                    if mobile
+                                    else "城市级（IP 库估算）"
+                                )
+                            )
+                            lines.append("说明=非 GPS 实测，供天气问候/大致位置参考")
+                            lines.append("来源=ip-api")
+                            return "\n".join(lines)
+                        msg = data.get("message") if isinstance(data, dict) else None
+                        errors.append(f"ip-api: {msg or data!r}"[:160])
+                    else:
+                        errors.append(f"ip-api HTTP {resp.status}")
+            except Exception as exc:
+                errors.append(f"ip-api: {exc}")
+
+        detail = "；".join(errors) if errors else "未知错误"
+        logger.warning(f"[{_HUB_DISPLAY}] IP 定位失败 ip={raw}: {detail}")
+        return f"查询 IP 定位失败：{detail}"
+
     def _can_manage_qq_binding(self, event: AstrMessageEvent) -> bool:
         """Whether the caller may bind/unbind QQ for others (admin / OP only)."""
         if event.get_extra("mc_ai_event"):
@@ -2252,9 +2442,7 @@ class EndstoneArcMessageCenter(Star):
             )
 
         if len(resolved_mentions) > 1:
-            listing = "、".join(
-                f"{name or uid}" for uid, name in resolved_mentions
-            )
+            listing = "、".join(f"{name or uid}" for uid, name in resolved_mentions)
             return "", f"消息里 @ 了多人（{listing}），请只 @ 一位或显式传入 qq。"
         return (
             "",
@@ -2273,13 +2461,11 @@ class EndstoneArcMessageCenter(Star):
             bound = str(data.get("qq") or "").strip()
             xuid = str(data.get("xuid") or "").strip()
             if bound:
-                return (
-                    f"玩家 {canonical} 已绑定 QQ {bound}"
-                    + (f"，XUID {xuid}" if xuid else "")
+                return f"玩家 {canonical} 已绑定 QQ {bound}" + (
+                    f"，XUID {xuid}" if xuid else ""
                 )
-            return (
-                f"玩家 {canonical} 存在记录但未绑定 QQ"
-                + (f"（XUID {xuid}）" if xuid else "")
+            return f"玩家 {canonical} 存在记录但未绑定 QQ" + (
+                f"（XUID {xuid}）" if xuid else ""
             )
         if qq_str:
             bound_name = store.get_qq_player(qq_str)
@@ -2287,10 +2473,7 @@ class EndstoneArcMessageCenter(Star):
                 return f"QQ {qq_str} 已绑定游戏角色「{bound_name}」"
             hist = store.get_qq_player_history(qq_str)
             if hist:
-                return (
-                    f"QQ {qq_str} 当前未绑定；历史关联角色："
-                    + "、".join(hist)
-                )
+                return f"QQ {qq_str} 当前未绑定；历史关联角色：" + "、".join(hist)
             return f"QQ {qq_str} 无绑定记录"
         return "请提供 player_name 或 qq"
 
@@ -2327,7 +2510,9 @@ class EndstoneArcMessageCenter(Star):
         canonical, stored = store.find_player_entry(name)
         player_xuid = str((stored or {}).get("xuid") or "").strip()
         if not player_xuid:
-            resolved_name, resolved_xuid = await self._hub._resolve_player_via_core(name)
+            resolved_name, resolved_xuid = await self._hub._resolve_player_via_core(
+                name
+            )
             if not resolved_xuid:
                 return (
                     f"服务器记录中找不到名为「{name}」的玩家。"
@@ -2353,18 +2538,13 @@ class EndstoneArcMessageCenter(Star):
         if not store.bind_player_qq(target, player_xuid, qq_str):
             return "绑定失败，请稍后重试"
         # 传统数字 QQ 才改群名片；openid 等字符串 ID 不能 int()
-        if (
-            self._hub.sync_group_card
-            and self._hub.set_group_card
-            and qq_str.isdigit()
-        ):
+        if self._hub.sync_group_card and self._hub.set_group_card and qq_str.isdigit():
             try:
                 await self._hub.set_group_card(int(qq_str), target)
             except Exception as error:
                 logger.warning(f"[{_HUB_DISPLAY}] 绑定工具改群名片失败: {error}")
         return (
-            f"已将平台用户 {qq_str} 绑定到游戏角色「{target}」"
-            f"（操作者 {admin_label}）"
+            f"已将平台用户 {qq_str} 绑定到游戏角色「{target}」（操作者 {admin_label}）"
         )
 
     async def _admin_unbind_qq(
@@ -2383,7 +2563,9 @@ class EndstoneArcMessageCenter(Star):
             # Allow @-only unbind
             qq_str, resolve_error = await self._resolve_binding_user_id(event, "")
             if resolve_error:
-                return resolve_error or "解绑需要提供 player_name、平台用户 ID，或 @ 对方"
+                return (
+                    resolve_error or "解绑需要提供 player_name、平台用户 ID，或 @ 对方"
+                )
             name = store.get_qq_player(qq_str)
             if not name:
                 return f"平台用户 {qq_str} 当前没有绑定的游戏角色"
@@ -2402,10 +2584,7 @@ class EndstoneArcMessageCenter(Star):
             return f"玩家「{canonical}」当前未绑定平台用户"
         if not store.unbind_player_qq(canonical, admin_name=admin_label):
             return "解绑失败，请稍后重试"
-        return (
-            f"已解除「{canonical}」与平台用户 {bound} 的绑定"
-            f"（操作者 {admin_label}）"
-        )
+        return f"已解除「{canonical}」与平台用户 {bound} 的绑定（操作者 {admin_label}）"
 
     @filter.llm_tool(name="mc_qq_binding")
     async def mc_qq_binding(
